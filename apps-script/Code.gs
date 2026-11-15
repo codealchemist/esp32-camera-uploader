@@ -18,6 +18,7 @@
  *   NOTIFY_COOLDOWN_MIN  optional. Minutes without emails after one is sent
  *                   (photos still go to Drive); default 60, 0 = no cooldown.
  *   ROOT_FOLDER_ID  managed by the script. Do not edit.
+ *   OWNER_EMAIL     set by setup(): the only account the control page opens for.
  *   NOTIFY_STATE, NOTIFY_LAST_SENT, NOTIFY_SUPPRESSED
  *                   managed by the script (pending email, cooldown bookkeeping).
  *
@@ -143,21 +144,21 @@ function handleSaved_(body) {
  * Opened by you (deployment "Only myself", signed in): the control page.
  * Anyone else, e.g. the bridge's own deployment opened anonymously: a health check.
  */
-const CODE_VERSION = '0.6.1';
+const CODE_VERSION = '0.6.2';
 
 function doGet(e) {
   // ?diag=1: why the control page does or doesn't open. Only yes/no answers,
   // never the addresses themselves, so it's safe on the public deployment too.
   if (e && e.parameter && e.parameter.diag) {
-    let active = '', effective = '', error = '';
-    try { effective = Session.getEffectiveUser().getEmail(); } catch (err) { error = String(err).substring(0, 120); }
-    try { active = Session.getActiveUser().getEmail(); } catch (err) { error = error || String(err).substring(0, 120); }
+    let active = '', error = '';
+    try { active = Session.getActiveUser().getEmail(); } catch (err) { error = String(err).substring(0, 200); }
+    const owner = PropertiesService.getScriptProperties().getProperty('OWNER_EMAIL') || '';
     return json_({
       code_version: CODE_VERSION,
       control_page_file: (() => { try { HtmlService.createHtmlOutputFromFile('Control'); return true; } catch (err) { return false; } })(),
-      script_owner_email_readable: !!effective,
+      owner_recorded: !!owner,          // false: run setup() once in the editor
       your_email_readable: !!active,
-      you_are_owner: !!active && active === effective,
+      you_are_owner: !!active && !!owner && active.toLowerCase() === owner.toLowerCase(),
       error: error,
     });
   }
@@ -231,11 +232,13 @@ function creditRemotePhotos_(n) {
 // Every function below checks that the signed-in user is the script's owner,
 // so they can't be used from the bridge's public deployment.
 
+// The owner's address is recorded by setup(), run in the editor by the owner.
+// (Session.getEffectiveUser() would need another permission.)
 function isOwner_() {
   try {
-    const me = Session.getEffectiveUser().getEmail();
+    const owner = PropertiesService.getScriptProperties().getProperty('OWNER_EMAIL');
     const who = Session.getActiveUser().getEmail();
-    return !!me && who === me;
+    return !!owner && !!who && who.toLowerCase() === owner.toLowerCase();
   } catch (err) {
     return false;
   }
@@ -397,6 +400,13 @@ function ui_thumbs(ids) {
  * and installs the daily cleanup trigger. Safe to run again.
  */
 function setup() {
+  const me = Session.getActiveUser().getEmail();
+  if (me) {
+    PropertiesService.getScriptProperties().setProperty('OWNER_EMAIL', me);
+    Logger.log('Control page owner recorded (the account running setup).');
+  } else {
+    Logger.log('Could not read your email: approve the email permission and run setup again.');
+  }
   const rootId = rootFolderId_();
   ScriptApp.getProjectTriggers()
     .filter(t => t.getHandlerFunction() === 'cleanup')

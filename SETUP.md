@@ -56,7 +56,7 @@ The script only gets Google's narrow `drive.file` permission: it can see and cha
    | `NOTIFY_EMAIL` | optional: the address for motion emails (see *Email alerts* below) |
    | `NOTIFY_COOLDOWN_MIN` | optional: minutes without emails after one is sent (default `60`, `0` = off) |
 
-   `ROOT_FOLDER_ID`, `NOTIFY_STATE`, `NOTIFY_LAST_SENT` and `NOTIFY_SUPPRESSED` are managed by the script; don't add them.
+   `ROOT_FOLDER_ID`, `OWNER_EMAIL`, `NOTIFY_STATE`, `NOTIFY_LAST_SENT` and `NOTIFY_SUPPRESSED` are managed by the script; don't add them.
 6. **Run setup once:** choose `setup` in the function list next to **Debug** and click **Run**.
    - If Google warns that the app isn't verified, click **Advanced → Go to … (unsafe)**. It's your own script.
    - Check the permission screen. For Drive it should only ask for *the specific Google Drive files you use with this app*. It also asks to run when you're not present (cleanup), to send email as you (alerts) and to connect to an external service (attaching photos to alerts). **If it asks for access to all your Google Drive files, stop:** the manifest wasn't saved.
@@ -91,7 +91,7 @@ How it works:
 Setup:
 1. In the Apps Script editor, add an HTML file: **Files → + → HTML**, named **`Control`**. Paste [`apps-script/Control.html`](apps-script/Control.html) into it.
 2. Paste the current `Code.gs` and `appsscript.json`, and save. The manifest adds one permission, **your email address**: the page uses it to check that the person signed in is you.
-3. Run `setup` once in the editor to approve the new permission.
+3. Run `setup` once in the editor, signed in as yourself. It approves the new permission and records your account as the only one the control page opens for (`OWNER_EMAIL` in Script properties).
 4. **Update the bridge's deployment:** **Deploy → Manage deployments →** edit the existing web app → **Version: New version**, keep *Who has access* = **Anyone** → **Deploy**. Same URL as before.
 5. **Create the control deployment:** **Deploy → New deployment → Web app**, *Execute as* **Me**, *Who has access* **Only myself** → **Deploy**. Its `/exec` URL is your control page.
 6. Open that URL on your phone, signed in to the same Google account, and add it to the home screen:
@@ -104,6 +104,7 @@ Notes:
   - the control URL should ask you to sign in to Google
 
   Every page function also refuses anyone who isn't the script's owner, so a wrong access setting can't expose the page.
+- **If the control URL shows the health check instead of the page,** add `?diag=1` to it. It lists, as yes/no only: code version, `Control` file present, owner recorded (if no, run `setup`), your email readable (if no, approve the email permission), and whether you're the owner.
 - If the page says "unable to open the file", your phone's browser is probably signed in to several Google accounts. Make the owner account the only one, or the first one, in that browser.
 - After each `Code.gs` update, publish a new version of **both** deployments, choosing the same access as before for each.
 
