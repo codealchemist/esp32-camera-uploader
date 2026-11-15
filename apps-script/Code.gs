@@ -143,7 +143,24 @@ function handleSaved_(body) {
  * Opened by you (deployment "Only myself", signed in): the control page.
  * Anyone else, e.g. the bridge's own deployment opened anonymously: a health check.
  */
-function doGet() {
+const CODE_VERSION = '0.6.1';
+
+function doGet(e) {
+  // ?diag=1: why the control page does or doesn't open. Only yes/no answers,
+  // never the addresses themselves, so it's safe on the public deployment too.
+  if (e && e.parameter && e.parameter.diag) {
+    let active = '', effective = '', error = '';
+    try { effective = Session.getEffectiveUser().getEmail(); } catch (err) { error = String(err).substring(0, 120); }
+    try { active = Session.getActiveUser().getEmail(); } catch (err) { error = error || String(err).substring(0, 120); }
+    return json_({
+      code_version: CODE_VERSION,
+      control_page_file: (() => { try { HtmlService.createHtmlOutputFromFile('Control'); return true; } catch (err) { return false; } })(),
+      script_owner_email_readable: !!effective,
+      your_email_readable: !!active,
+      you_are_owner: !!active && active === effective,
+      error: error,
+    });
+  }
   if (isOwner_()) {
     return HtmlService.createHtmlOutputFromFile('Control')
       .setTitle('YiCam')
