@@ -29,7 +29,7 @@
 #include "root_certs.h"
 #include "web_ui.h"
 
-static const char *FW_VERSION = "0.8.1";
+static const char *FW_VERSION = "0.8.2";
 static const char *HOSTNAME = "yicam-bridge";
 static const char *SETUP_AP_NAME = "YiCam-Setup";
 // The setup network's password is generated per device (see setupApPassword()).
@@ -239,7 +239,7 @@ volatile uint32_t remoteEveryMs = 0;   // its interval (0 = the Settings interva
 volatile uint32_t remoteUntilMs = 0;
 volatile time_t lastPollOkT = 0;      // last successful check-in with the Apps Script
 volatile uint32_t lastNetOkMs = 0;     // last successful check-in or upload (network watchdog)
-TaskHandle_t workerHandle = nullptr, pollHandle = nullptr;
+TaskHandle_t workerHandle = nullptr;
 volatile uint32_t motionSinceMs = 0;
 
 volatile uint32_t statEvents = 0, statCaptured = 0, statCaptureFail = 0,
@@ -542,7 +542,12 @@ String scriptCall(const String &action, const String &extraQuery, const String &
   return r;
 }
 
+void driveKAclose();
+
 String scriptCallLocked(const String &action, const String &extraQuery, const String &body, bool quiet) {
+  // Only one TLS connection at a time: each takes ~45 KB, and two at once ran
+  // the heap down to ~55 KB, after which the network stack stopped working.
+  driveKAclose();
   String host, basePath;
   if (!splitHttpsUrl(cfg.scriptUrl, host, basePath)) {
     if (!quiet) setError("upload: the Apps Script URL is missing or not https://");
@@ -1235,17 +1240,6 @@ long jsonNum(const String &j, const char *key) {
 
 void pollRemote();
 
-// Check-ins run in their own task, so their ~9 s (two TLS handshakes plus the
-// script) never hold up photo uploads.
-void pollTask(void *) {
-  for (;;) {
-    if (cfg.remoteOn && cfg.scriptUrl.length() && WiFi.isConnected() &&
-        (int32_t)(millis() - nextPollMs) >= 0)
-      pollRemote();
-    vTaskDelay(pdMS_TO_TICKS(250));
-  }
-}
-
 void pollRemote() {
   uint32_t t0 = millis();
   String r = scriptCall("poll", "", pollBody(), true);
@@ -1312,8 +1306,10 @@ void pollRemote() {
     long every = jsonNum(obj, "every"), secs = jsonNum(obj, "secs");
     if (every < 3) every = 3;
     if (every > 60) every = 60;
-    if (secs < 15) secs = 15;
-    if (secs > 120) secs = 120;
+    // Hold the live view until well past the next check-in (which can take ~10 s).
+    long minHold = (long)cfg.pollSec * 2 + 15;
+    if (secs < minHold) secs = minHold;
+    if (secs > 600) secs = 600;
     bool wasLive = remoteActive && remoteLive;
     remoteEveryMs = (uint32_t)every * 1000UL;
     remoteUntilMs = millis() + (uint32_t)secs * 1000UL;
@@ -1329,9 +1325,7 @@ void pollRemote() {
     remoteLive = false;
     Serial.println("[remote] live view: nobody watching, stopped");
   }
-  // While the live view runs, check in every 15 s so frequency changes and
-  // Pause take effect quickly.
-  uint32_t interval = (remoteActive && remoteLive && cfg.pollSec > 15) ? 15 : cfg.pollSec;
+  uint32_t interval = cfg.pollSec;
   nextPollMs = millis() + (got ? 2000UL : interval * 1000UL);
 }
 
@@ -1401,13 +1395,22 @@ void workerTask(void *) {
     bool captureSoon = capturing && millis() - lastShotMs + 1500 >= nextInterval;
     if (!captureSoon && WiFi.isConnected()) {
       int slot = nextSlotToUpload();
-      if (slot >= 0 && (int32_t)(millis() - nextUploadMs) >= 0) {
+      if (cfg.remoteOn && cfg.scriptUrl.length() && (int32_t)(millis() - nextPollMs) >= 0) {
+        pollRemote();  // in this task: never at the same time as an upload
+      } else if (slot >= 0 && (int32_t)(millis() - nextUploadMs) >= 0) {
         digitalWrite(LED_PIN, HIGH);
+        static uint8_t failsInARow = 0;
         if (uploadSlot(slot)) {
           statUploaded++;
           lastUploadT = time(nullptr);
+          failsInARow = 0;
         } else {
           statUploadFail++;
+          if (++failsInARow >= 6) {  // ~3 minutes of failures: start clean (queue is in NVS)
+            Serial.println("[watchdog] 6 uploads failed in a row, restarting");
+            delay(200);
+            ESP.restart();
+          }
           Slot &sl = slotStore.s[slot];
           if (sl.state == 1 && ++sl.tries >= SLOT_MAX_TRIES) {
             sl.state = 0;  // give up on this one so the slot can be reused
@@ -2174,8 +2177,7 @@ void setup() {
   setupWeb();
 
   xTaskCreatePinnedToCore(workerTask, "worker", 16384, nullptr, 1, &workerHandle, 1);
-  // 20 KB: an Apps Script call keeps two TLS clients (several KB each) on the stack.
-  xTaskCreatePinnedToCore(pollTask, "poll", 20480, nullptr, 1, &pollHandle, 0);
+
   lastNetOkMs = millis();
   Serial.println("[boot] ready");
 }
@@ -2188,11 +2190,10 @@ void watchdogs() {
   uint32_t now = millis();
   if (now - lastHealth >= 30000) {
     lastHealth = now;
-    Serial.printf("[health] up %lus heap %u min %u maxblk %u wifi %d rssi %d stack free: worker %u poll %u loop %u\n",
+    Serial.printf("[health] up %lus heap %u min %u maxblk %u wifi %d rssi %d stack free: worker %u loop %u\n",
                   (unsigned long)(now / 1000), ESP.getFreeHeap(), ESP.getMinFreeHeap(), ESP.getMaxAllocHeap(),
                   (int)WiFi.status(), WiFi.RSSI(),
                   workerHandle ? (unsigned)uxTaskGetStackHighWaterMark(workerHandle) : 0,
-                  pollHandle ? (unsigned)uxTaskGetStackHighWaterMark(pollHandle) : 0,
                   (unsigned)uxTaskGetStackHighWaterMark(nullptr));
   }
   if (WiFi.status() != WL_CONNECTED) {
