@@ -82,9 +82,11 @@ To test it, run `testNotification` in the editor. You should get a "[Test] YiCam
 A second deployment of the same script gives you a page, signed in with your Google account, with:
 - **Live view:** while the page is open and in the foreground, the bridge takes a frame every 3, 5, 10 or 30 s (your choice, remembered on each device), and the panel shows the newest one. **Pause** stops it.
   - It also stops when you switch apps or lock the phone, and by itself within 2 minutes if the page is closed.
-  - Until the first frame arrives (up to one check-in), a spinner shows over the last photo.
+  - A spinner only shows when there's no image at all yet. The first frame arrives within one check-in.
   - Frames are named `…-l.jpg` and kept out of emails and the timeline, and frames older than 15 minutes are deleted.
-  - Each frame is a full photo (~150 KB), so at 5 s it uses about 100 MB of mobile data per hour of watching.
+  - Live frames are low resolution (~30–50 KB), so at 5 s it's roughly 30 MB of mobile data per hour of watching. Motion and requested photos keep your full resolution.
+  - The bridge takes a new frame only once the previous one is uploaded, so frames come every *N* s or as fast as uploads allow, and never pile up. A waiting frame uploads before other photos, and only the newest one.
+  - The panel shows the last image without covering it. It's in black and white while you wait if it's older than 5 minutes. A thin line at the bottom counts down to the next frame (or the next check-in), next to the frame's time and the live status.
 - **Capture requests:** a snapshot, or 30 s / 1 min of shots at the bridge's *Seconds between shots*.
 - **Timeline:** photos grouped by event, with the event's video clips. Move between days with ‹ › or the calendar (days with photos are highlighted), and open the day's folder with **Drive ↗**.
 - **Viewer:** tap a photo or clip to open it on the page. Step through an event with ‹ › or by swiping; clips (~5 MB) take a few seconds to load. **Open in Drive** is always there.

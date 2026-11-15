@@ -52,8 +52,16 @@ background:#0b0d11cc;color:#cfd5e1;font-size:13px;text-align:center;padding:12px
 .lctl .every button{padding:5px 9px;font-size:12px;color:var(--mu)}
 .lctl .every button.sel{background:var(--ac);border-color:var(--ac);color:#06101f}
 .lctl small{color:var(--mu);font-size:12px}
-.latest>span{position:absolute;left:0;right:0;bottom:0;padding:18px 10px 7px;font-size:12px;color:#fff;
-background:linear-gradient(transparent,#000a)}
+.latest img.stale{filter:grayscale(1) brightness(.85)}
+.cap{position:absolute;left:0;right:0;bottom:0;display:flex;justify-content:space-between;gap:10px;
+padding:22px 10px 9px;font-size:12px;color:#fff;background:linear-gradient(transparent,#000b)}
+.cap span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cap span:last-child{color:#cfd5e1;flex:none}
+.tbar{position:absolute;left:0;right:0;bottom:0;height:3px;background:#ffffff1f}
+.tbar i{display:block;height:100%;width:0;background:var(--ac)}
+.tbar.late i{width:100%!important;animation:tb 1.2s ease-in-out infinite alternate}
+.tbar[hidden]{display:none}
+@keyframes tb{from{opacity:.25}to{opacity:1}}
 .tlh{display:flex;align-items:center;gap:6px;margin-bottom:12px}
 .tlh button{padding:7px 11px;font-size:14px;border-radius:99px}
 .tlh .day{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -99,7 +107,9 @@ position:relative}
 
 <section class="card">
  <a class="latest" id="latest" href="#"><img id="latestImg" alt="Latest photo">
-  <div class="lload" id="lload"><i class="spin"></i><span id="lloadT">Starting live view…</span></div><span id="latestCap"></span></a>
+  <div class="lload" id="lload"><i class="spin"></i><span id="lloadT">Starting live view…</span></div>
+  <div class="cap"><span id="latestCap"></span><span id="latestStat"></span></div>
+  <div class="tbar" id="tbar"><i></i></div></a>
  <div class="lctl"><button id="liveBtn">⏸ Pause</button><small>every</small><div class="every" id="every"></div></div>
  <div class="state" id="state"><div class="big"><i></i></div><div><b id="stT">–</b><span id="stS"></span></div></div>
  <div class="btns">
@@ -240,16 +250,30 @@ async function showLatest(l) {
     const src = 'data:' + m.mime + ';base64,' + m.data;
     MEDIA[l.id] = src;
     $('latestImg').src = src;
+    setLoading(false);  // there is an image now: never cover it
     const d2 = nameDate(l.name);
-    if (LV.on && !LV.first && d2 && d2.getTime() >= LV.startedAt - 5000) { LV.first = true; setLoading(false); }
+    if (LV.on && d2 && d2.getTime() >= LV.startedAt - 5000) {
+      LV.first = true;
+      timerStart(LV.every * 1000);  // a fresh frame: count down to the next one
+    }
+    updateStale();
     $('latest').onclick = e => { e.preventDefault(); openViewer([{ id: l.id, name: l.name, url: m.url, kind: 'photo' }], 0); };
     updateLatestCaption(l);
   } catch (e) { latestId = null; }
 }
+let latestName = null;
 function updateLatestCaption(l) {
+  latestName = l.name;
   const d = nameDate(l.name);
-  $('latestCap').textContent = 'Latest photo · ' + nameTime(l.name) + (d ? ' · ' + ago(Date.now() - d) : '') +
-    (/-r\.jpe?g$/i.test(l.name) ? ' · requested' : '');
+  $('latestCap').textContent = (/-l\.jpe?g$/i.test(l.name) ? 'Live · ' : 'Latest · ') + nameTime(l.name) +
+    (d ? ' · ' + ago(Date.now() - d) : '') + (/-r\.jpe?g$/i.test(l.name) ? ' · requested' : '');
+  updateStale();
+}
+// While waiting for a current frame, an image older than 5 minutes shows in black and white.
+function updateStale() {
+  const d = nameDate(latestName);
+  const old = !!d && Date.now() - d.getTime() > 5 * 60 * 1000;
+  $('latestImg').classList.toggle('stale', old && LV.on && !LV.first);
 }
 
 // --- Live view: frames every N s while the page is open and visible ---
@@ -260,7 +284,23 @@ try {
   if (v) { LV.on = v.on !== false; if (EVERY.indexOf(v.every) >= 0) LV.every = v.every; }
 } catch (e) {}
 function saveLV() { try { localStorage.setItem('yicamLive', JSON.stringify({ on: LV.on, every: LV.every })); } catch (e) {} }
-function setLoading(on, text) { $('lload').hidden = !on; if (text) $('lloadT').textContent = text; }
+// The overlay is only for "nothing to show yet"; with an image, status goes to the bottom bar.
+function setLoading(on, text) {
+  const noImage = !$('latestImg').getAttribute('src');
+  $('lload').hidden = !(on && noImage);
+  if (text) $('lloadT').textContent = text;
+}
+// Timer line: fills until the next expected frame (or check-in); pulses when it's late.
+const TM = { start: 0, end: 0 };
+function timerStart(ms) { TM.start = Date.now(); TM.end = TM.start + ms; }
+setInterval(() => {
+  const bar = $('tbar');
+  bar.hidden = !LV.on || !TM.end;
+  if (bar.hidden) return;
+  const now = Date.now(), late = now > TM.end + 1500;
+  bar.classList.toggle('late', late);
+  if (!late) bar.firstElementChild.style.width = Math.min(100, 100 * (now - TM.start) / (TM.end - TM.start)) + '%';
+}, 250);
 function renderLiveCtl() {
   $('liveBtn').textContent = LV.on ? '⏸ Pause' : '▶ Live view';
   const box = $('every'); box.textContent = '';
@@ -271,14 +311,15 @@ function renderLiveCtl() {
   }
 }
 async function liveStart(keepFirst) {
-  if (!keepFirst) { LV.startedAt = Date.now(); LV.first = false; setLoading(true, 'Starting live view…'); }
+  if (!keepFirst) { LV.startedAt = Date.now(); LV.first = false; setLoading(true, 'Starting live view…'); updateStale(); }
   try { renderState(await run('ui_live', 'start', LV.every)); } catch (e) { err(String(e.message || e)); }
   clearInterval(LV.renew);
   LV.renew = setInterval(() => { if (LV.on && !document.hidden) run('ui_live', 'start', LV.every).catch(() => {}); }, 60000);
 }
 async function liveStop() {
   clearInterval(LV.renew); LV.renew = null;
-  setLoading(false);
+  setLoading(false); TM.end = 0; updateStale();
+  $('latestStat').textContent = 'paused';
   try { await run('ui_live', 'stop'); } catch (e) {}
 }
 $('liveBtn').onclick = () => {
@@ -286,15 +327,28 @@ $('liveBtn').onclick = () => {
   if (LV.on) liveStart(); else liveStop();
   schedulePoll();
 };
-// The loading text says when the bridge is expected to pick the request up.
+// Live status: the overlay text (only shown without any image) and the bottom bar's stats.
 function liveLoadingText(s) {
-  if (!LV.on || LV.first) return;
   const b = s.bridge, st = b && b.status || {};
-  const pollMs = (st.poll_s || 30) * 1000;
-  if (!b || s.now - b.seen > Math.max(90000, 3 * pollMs)) return setLoading(true, 'Bridge offline: the live view starts when it checks in again.');
+  const stat = $('latestStat');
+  if (!LV.on) { stat.textContent = 'paused'; return; }
+  const pollMs = (st.live ? 10 : (st.poll_s || 30)) * 1000;  // the bridge checks in every 10 s while live
+  const queued = st.queued ? ' · ' + st.queued + ' waiting to upload' : '';
+  if (!b || s.now - b.seen > Math.max(90000, 3 * pollMs)) {
+    stat.textContent = 'bridge offline';
+    if (!LV.first) TM.end = 0;
+    return setLoading(true, 'Bridge offline: the live view starts when it checks in again.');
+  }
+  if (LV.first) { stat.textContent = 'every ' + LV.every + ' s' + queued; return; }
+  if (st.remote && st.live) {
+    stat.textContent = 'starting · every ' + LV.every + ' s' + queued;
+    if (!TM.end || Date.now() > TM.end + 1500) timerStart(LV.every * 1000);
+    return setLoading(true, 'Live view running, waiting for the first frame…');
+  }
   const left = Math.max(1, Math.round((pollMs - (s.now - b.seen)) / 1000));
-  setLoading(true, st.remote && st.live ? 'Live view running, waiting for the next frame…'
-                                        : 'Waiting for the bridge (next check-in in ~' + left + ' s)…');
+  stat.textContent = 'next check-in ~' + left + ' s';
+  TM.start = Date.now() - (s.now - b.seen); TM.end = TM.start + pollMs;  // count down to the check-in
+  setLoading(true, 'Waiting for the bridge (next check-in in ~' + left + ' s)…');
 }
 
 // --- Days and calendar ---

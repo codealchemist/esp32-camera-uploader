@@ -152,7 +152,7 @@ function handleSaved_(body) {
  * Opened by you (deployment "Only myself", signed in): the control page.
  * Anyone else, e.g. the bridge's own deployment opened anonymously: a health check.
  */
-const CODE_VERSION = '0.7.1';
+const CODE_VERSION = '0.7.2';
 
 function doGet(e) {
   // ?diag=1: why the control page does or doesn't open. Only yes/no answers,
@@ -261,8 +261,16 @@ function ui_state() {
   const bridge = JSON.parse(CacheService.getScriptCache().get('BRIDGE') || 'null');
   const cmds = JSON.parse(PropertiesService.getScriptProperties().getProperty('COMMANDS') || '[]');
   const shown = cmds.filter(c => c.type !== 'live' && c.type !== 'stop');
+  let latest = latestPhoto_();
+  // Live frames aren't reported by the bridge (it saves it two connections per
+  // frame); while the live view runs, find the newest one in Drive.
+  const st = bridge && bridge.status;
+  if (st && (st.live || st.remote) && Date.now() - bridge.seen < 5 * 60 * 1000) {
+    const lv = newestLiveFrame_();
+    if (lv && (!latest || lv.name > latest.name)) latest = lv;
+  }
   return { now: Date.now(), bridge: bridge, commands: shown.slice(-4).reverse(), cmdTtlMs: CMD_TTL_MS,
-           latest: latestPhoto_() };
+           latest: latest };
 }
 
 function ui_capture(kind) {
@@ -384,6 +392,30 @@ function ui_live(action, every) {
     props.setProperty('COMMANDS', JSON.stringify(cmds.slice(-20)));
   });
   return ui_state();
+}
+
+/** Newest live-view frame of the last 10 minutes (looked up at most every 2 s). */
+function newestLiveFrame_() {
+  const cache = CacheService.getScriptCache();
+  const hit = cache.get('LIVE_NEWEST');
+  if (hit) return JSON.parse(hit);
+  try {
+    const since = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    const res = Drive.Files.list({
+      q: `name contains '-l.jp' and mimeType = 'image/jpeg' and trashed = false and createdTime > '${since}'`,
+      orderBy: 'createdTime desc', fields: 'files(id, name, parents)', pageSize: 1,
+    });
+    const f = res.files && res.files[0];
+    const out = f ? { id: f.id, name: f.name } : null;
+    cache.put('LIVE_NEWEST', JSON.stringify(out), 2);
+    if (f) {
+      rememberLatest_(f.id, f.name);
+      if (f.parents && f.parents[0]) pruneLiveFrames_(f.parents[0]);
+    }
+    return out;
+  } catch (err) {
+    return null;
+  }
 }
 
 /** Deletes live-view frames older than 15 minutes in a day folder (at most every 5 minutes). */

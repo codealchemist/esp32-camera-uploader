@@ -29,7 +29,7 @@
 #include "root_certs.h"
 #include "web_ui.h"
 
-static const char *FW_VERSION = "0.7.0";
+static const char *FW_VERSION = "0.7.1";
 static const char *HOSTNAME = "yicam-bridge";
 static const char *SETUP_AP_NAME = "YiCam-Setup";
 // The setup network's password is generated per device (see setupApPassword()).
@@ -369,6 +369,38 @@ int pendingSlots() {
   return n;
 }
 
+bool liveFramePending() {
+  for (auto &s : slotStore.s)
+    if (s.state == 1 && (s.flags & SLOT_LIVE)) return true;
+  return false;
+}
+
+// Which photo to upload next. A live-view frame goes first, and only the
+// newest one: older waiting frames are already out of date, so their slots
+// are freed without uploading. Everything else goes oldest first.
+int nextSlotToUpload() {
+  int newestLive = -1;
+  for (int k = 0; k < SLOTS; k++) {  // ring order: later k = newer
+    int i = (slotStore.next + k) % SLOTS;
+    if (slotStore.s[i].state == 1 && (slotStore.s[i].flags & SLOT_LIVE)) newestLive = i;
+  }
+  if (newestLive >= 0) {
+    bool freed = false;
+    for (auto &s : slotStore.s)
+      if (s.state == 1 && (s.flags & SLOT_LIVE) && &s != &slotStore.s[newestLive]) {
+        s.state = 0;
+        freed = true;
+      }
+    if (freed) saveSlots();
+    return newestLive;
+  }
+  for (int k = 0; k < SLOTS; k++) {
+    int i = (slotStore.next + k) % SLOTS;
+    if (slotStore.s[i].state == 1) return i;
+  }
+  return -1;
+}
+
 int oldestPendingSlot() {  // slots are filled in ring order
   for (int k = 0; k < SLOTS; k++) {
     int i = (slotStore.next + k) % SLOTS;
@@ -393,7 +425,9 @@ bool captureToCamera(uint8_t seq, uint8_t flags) {
   http.setTimeout(15000);
   http.setConnectTimeout(5000);
   http.setReuse(false);
-  String url = "http://" + cfg.camHost + "/cgi-bin/snapshot.sh?res=" + cfg.res +
+  // Live-view frames are low resolution: quick to upload, light on mobile data.
+  String res = (flags & SLOT_LIVE) ? String("low") : cfg.res;
+  String url = "http://" + cfg.camHost + "/cgi-bin/snapshot.sh?res=" + res +
                "&watermark=yes&file=" + slotFile(i);
   if (!http.begin(client, url)) {
     setError("capture: bad camera address " + cfg.camHost);
@@ -732,7 +766,9 @@ bool uploadSlot(int i) {
   if (id.isEmpty()) return false;
   sl.state = 0;
   saveSlots();
-  reportSaved(id, name, folder, "photo");
+  // Live frames aren't reported: the script finds the newest one itself when
+  // the page asks, which saves the bridge two connections per frame.
+  if (!(sl.flags & SLOT_LIVE)) reportSaved(id, name, folder, "photo");
   setText(lastUploaded, name);
   Serial.printf("[upload] %s -> Drive (%ld bytes)\n", name.c_str(), len);
   return true;
@@ -1144,7 +1180,10 @@ void workerTask(void *) {
                      (lastShotMs == 0 || now - lastShotMs >= cfg.intervalSec * 1000UL);
     // A "capture for a while" request from the control page uses the same
     // interval and shares the schedule with motion, so shots never double up.
-    bool dueRemote = remoteActive && now - lastShotMs >= remoteInterval;
+    // Live view: no new frame while the previous one is still uploading, so a
+    // backlog can't build up; the rate becomes "every N s or as fast as uploads go".
+    bool dueRemote = remoteActive && now - lastShotMs >= remoteInterval &&
+                     !(remoteLive && liveFramePending());
     if (manualShot || dueMotion || dueRemote) {
       if (dueMotion) shotsThisEvent++;
       lastShotMs = now;
@@ -1171,7 +1210,7 @@ void workerTask(void *) {
     uint32_t nextInterval = (motionActive && shotsThisEvent < cfg.maxShots) ? cfg.intervalSec * 1000UL : remoteInterval;
     bool captureSoon = capturing && millis() - lastShotMs + 1500 >= nextInterval;
     if (!captureSoon && WiFi.isConnected()) {
-      int slot = oldestPendingSlot();
+      int slot = nextSlotToUpload();
       if (cfg.remoteOn && cfg.scriptUrl.length() && (int32_t)(millis() - nextPollMs) >= 0) {
         pollRemote();  // short; uploads continue on the next pass
       } else if (slot >= 0 && (int32_t)(millis() - nextUploadMs) >= 0) {
