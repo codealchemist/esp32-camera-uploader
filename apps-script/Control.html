@@ -37,9 +37,48 @@ background:#ffffff06;border-radius:9px}
 .cmd b{color:var(--tx);font-weight:600}.cmd .ok{color:var(--ok)}.cmd .bad{color:var(--bad)}
 .err{display:none;margin-top:12px;padding:9px 11px;border-radius:9px;background:#f0506e14;border:1px solid #f0506e44;
 color:#ffb3c1;font-size:13px;overflow-wrap:anywhere}
-.days{display:flex;gap:6px;overflow-x:auto;padding-bottom:4px;margin-bottom:12px;scrollbar-width:none}
-.days button{padding:6px 12px;font-size:13px;border-radius:99px;white-space:nowrap;flex:none;color:var(--mu)}
-.days button.sel{background:var(--ac);border-color:var(--ac);color:#06101f}
+.latest{display:block;position:relative;margin:0 0 8px;border-radius:10px;overflow:hidden;background:#000;aspect-ratio:16/9;cursor:zoom-in}
+.latest img{width:100%;height:100%;object-fit:cover;display:block}
+.latest img:not([src]){visibility:hidden}
+.lload{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;
+background:#0b0d11cc;color:#cfd5e1;font-size:13px;text-align:center;padding:12px}
+.lload[hidden]{display:none}
+.lload span{max-width:260px}
+.spin{width:28px;height:28px;border-radius:50%;border:3px solid #ffffff22;border-top-color:var(--ac);animation:sp 1s linear infinite}
+@keyframes sp{to{transform:rotate(360deg)}}
+.lctl{display:flex;align-items:center;gap:8px;margin:0 0 14px;flex-wrap:wrap}
+.lctl button{padding:6px 12px;font-size:13px;border-radius:99px}
+.lctl .every{display:flex;gap:4px;margin-left:auto}
+.lctl .every button{padding:5px 9px;font-size:12px;color:var(--mu)}
+.lctl .every button.sel{background:var(--ac);border-color:var(--ac);color:#06101f}
+.lctl small{color:var(--mu);font-size:12px}
+.latest>span{position:absolute;left:0;right:0;bottom:0;padding:18px 10px 7px;font-size:12px;color:#fff;
+background:linear-gradient(transparent,#000a)}
+.tlh{display:flex;align-items:center;gap:6px;margin-bottom:12px}
+.tlh button{padding:7px 11px;font-size:14px;border-radius:99px}
+.tlh .day{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tlh a{font-size:13px;padding:7px 10px;border-radius:99px;border:1px solid var(--line);white-space:nowrap}
+.cal{margin:-4px 0 14px;padding:10px;border:1px solid var(--line);border-radius:12px;background:#0b0d11}
+.calh{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;font-weight:600;font-size:14px}
+.calh button{padding:4px 12px;border-radius:99px}
+.calg{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:3px;text-align:center}
+.calg i{font-style:normal;font-size:11px;color:var(--mu);padding:2px 0}
+.calg button{padding:7px 0;font-size:13px;font-weight:500;border-radius:8px;border-color:transparent;background:none;color:#4a5262}
+.calg button.has{color:var(--tx);background:#ffffff0d;border-color:var(--line);font-weight:600}
+.calg button.today{box-shadow:inset 0 0 0 1px var(--ac)}
+.calg button.sel{background:var(--ac);border-color:var(--ac);color:#06101f}
+.modal{position:fixed;inset:0;z-index:10;background:#000e;display:flex;flex-direction:column}
+.modal[hidden]{display:none}
+.mbar{display:flex;align-items:center;gap:8px;padding:10px 12px;color:#fff;font-size:14px}
+.mbar span{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:600}
+.mbar a{font-size:13px;padding:6px 10px;border-radius:99px;border:1px solid #ffffff33;color:#fff;white-space:nowrap}
+.mbar button{padding:6px 12px;border-radius:99px;background:#ffffff14;border-color:#ffffff33}
+.mstage{flex:1;min-height:0;position:relative;display:flex;align-items:center;justify-content:center;padding:0 8px 16px}
+.mstage img,.mstage video{max-width:100%;max-height:100%;object-fit:contain;border-radius:6px;background:#000}
+.mmsg{color:#cfd5e1;font-size:14px;text-align:center;padding:20px}
+.mnav{position:absolute;top:50%;transform:translateY(-50%);width:44px;height:44px;border-radius:50%;padding:0;
+background:#0008;border-color:#ffffff33;font-size:22px;line-height:1;z-index:1}
+.mnav.prev{left:8px}.mnav.next{right:8px}.mnav[hidden]{display:none}
 .ev{border-top:1px solid var(--line);padding:12px 0}.ev:first-child{border-top:0;padding-top:0}
 .evh{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:baseline;gap:2px 8px;margin-bottom:8px}
 .evh b{font-size:15px}.evh span{color:var(--mu);font-size:12px}
@@ -59,6 +98,9 @@ position:relative}
 <header><h1>YiCam</h1><span class="pill" id="pill"><span class="dot"></span><span id="pillT">connecting…</span></span></header>
 
 <section class="card">
+ <a class="latest" id="latest" href="#"><img id="latestImg" alt="Latest photo">
+  <div class="lload" id="lload"><i class="spin"></i><span id="lloadT">Starting live view…</span></div><span id="latestCap"></span></a>
+ <div class="lctl"><button id="liveBtn">⏸ Pause</button><small>every</small><div class="every" id="every"></div></div>
  <div class="state" id="state"><div class="big"><i></i></div><div><b id="stT">–</b><span id="stS"></span></div></div>
  <div class="btns">
   <button class="pri" data-k="snap">Take<br>snapshot</button>
@@ -71,11 +113,22 @@ position:relative}
 
 <section class="card">
  <h2>Timeline</h2>
- <div class="days" id="days"></div>
+ <div class="tlh">
+  <button id="prevDay" title="Previous day with photos">‹</button>
+  <button class="day" id="dayBtn">–</button>
+  <button id="nextDay" title="Next day with photos">›</button>
+  <a id="dayDrive" href="#" title="Open this day's folder in Google Drive">Drive ↗</a>
+ </div>
+ <div class="cal" id="cal" hidden></div>
  <div id="tl"><div class="empty">Loading…</div></div>
 </section>
 <div class="foot" id="foot"></div>
 </main>
+<div class="modal" id="modal" hidden>
+ <div class="mbar"><span id="mTitle"></span><a id="mDrive" href="#">Open in Drive</a><button id="mClose" aria-label="Close">✕</button></div>
+ <div class="mstage" id="mWrap"><button class="mnav prev" id="mPrev" aria-label="Previous">‹</button>
+  <div id="mStage" style="display:contents"></div><button class="mnav next" id="mNext" aria-label="Next">›</button></div>
+</div>
 <script>
 const $ = id => document.getElementById(id);
 const run = (fn, ...args) => new Promise((ok, bad) =>
@@ -97,9 +150,11 @@ function renderState(s) {
   $('pillT').textContent = !b ? 'bridge not seen yet' : (online ? 'online' : 'offline') + ' · ' + ago(s.now - b.seen);
   const active = online && (st.motion || st.remote);
   $('state').classList.toggle('active', !!active);
-  $('stT').textContent = !online ? 'Bridge offline' : st.motion ? 'Motion detected' : st.remote ? 'Capturing (your request)' : 'Watching';
+  $('stT').textContent = !online ? 'Bridge offline' : st.motion ? 'Motion detected' : st.live ? 'Live view' :
+    st.remote ? 'Capturing (your request)' : 'Watching';
   $('stS').textContent = !b ? 'Waiting for the first check-in' :
-    'Checks in every ' + Math.round(pollMs / 1000) + ' s · ' + (st.camera_connected ? 'camera connected' : 'camera not connected') +
+    (online && st.live ? 'A frame every ' + LV.every + ' s' : 'Checks in every ' + Math.round(pollMs / 1000) + ' s') +
+    ' · ' + (st.camera_connected ? 'camera connected' : 'camera not connected') +
     (st.queued ? ' · ' + st.queued + ' photo(s) waiting to upload' : '');
   err(online && st.last_error ? 'Last bridge error: ' + st.last_error : '');
 
@@ -126,11 +181,21 @@ function renderState(s) {
   // New photos from a request: refresh today's timeline.
   if (lastPhotos >= 0 && photos > lastPhotos && DAY && DAYS[0] && DAY.id === DAYS[0].id) loadTimeline(DAY, true);
   lastPhotos = photos;
+  liveLoadingText(s);
+  showLatest(s.latest);
+  if (s.latest && latestId === s.latest.id) updateLatestCaption(s.latest);
 }
 
+let pollTimer = null;
+function schedulePoll() {
+  clearTimeout(pollTimer);
+  if (document.hidden) return;
+  pollTimer = setTimeout(poll, LV.on ? Math.min(5, LV.every) * 1000 : 5000);
+}
 async function poll() {
   try { renderState(await run('ui_state')); }
   catch (e) { err(String(e.message || e)); }
+  schedulePoll();
 }
 
 document.querySelectorAll('.btns button').forEach(btn => btn.onclick = async () => {
@@ -144,34 +209,162 @@ function localDay(dt) {
   const p = n => String(n).padStart(2, '0');
   return dt.getFullYear() + '-' + p(dt.getMonth() + 1) + '-' + p(dt.getDate());
 }
-function dayLabel(d, i) {
+function dayLabel(d) {
   const today = new Date();
   if (d === localDay(today)) return 'Today';
   if (d === localDay(new Date(today.getTime() - 86400000))) return 'Yesterday';
-  const dt = new Date(d + 'T12:00:00');
-  return dt.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' });
+  return new Date(d + 'T12:00:00').toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
+}
+// File names carry the local capture time: yyyyMMdd-HHmmss…
+function nameDate(n) {
+  const m = /^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})/.exec(n || '');
+  return m ? new Date(+m[1], m[2] - 1, +m[3], +m[4], +m[5], +m[6]) : null;
+}
+function nameTime(n) {
+  const d = nameDate(n);
+  if (!d) return n || '';
+  const t = d.toTimeString().substr(0, 8);
+  return localDay(d) === localDay(new Date()) ? t : dayLabel(localDay(d)) + ' ' + t;
 }
 
-function renderDays() {
-  const box = $('days'); box.textContent = '';
-  DAYS.forEach((d, i) => {
-    const b = document.createElement('button'); b.textContent = dayLabel(d.day, i);
-    b.className = DAY && DAY.id === d.id ? 'sel' : '';
-    b.onclick = () => loadTimeline(d);
+// --- Latest photo: the newest upload, refreshed as the bridge sends more ---
+let latestId = null;
+async function showLatest(l) {
+  if (!l || l.id === latestId) return;
+  latestId = l.id;
+  const d = nameDate(l.name);
+  if (d && !DAYMAP[localDay(d)]) refreshDays();  // a new day folder appeared
+  try {
+    const m = await run('ui_media', l.id);
+    if (latestId !== l.id) return;
+    const src = 'data:' + m.mime + ';base64,' + m.data;
+    MEDIA[l.id] = src;
+    $('latestImg').src = src;
+    const d2 = nameDate(l.name);
+    if (LV.on && !LV.first && d2 && d2.getTime() >= LV.startedAt - 5000) { LV.first = true; setLoading(false); }
+    $('latest').onclick = e => { e.preventDefault(); openViewer([{ id: l.id, name: l.name, url: m.url, kind: 'photo' }], 0); };
+    updateLatestCaption(l);
+  } catch (e) { latestId = null; }
+}
+function updateLatestCaption(l) {
+  const d = nameDate(l.name);
+  $('latestCap').textContent = 'Latest photo · ' + nameTime(l.name) + (d ? ' · ' + ago(Date.now() - d) : '') +
+    (/-r\.jpe?g$/i.test(l.name) ? ' · requested' : '');
+}
+
+// --- Live view: frames every N s while the page is open and visible ---
+const EVERY = [3, 5, 10, 30];
+const LV = { on: true, every: 5, startedAt: 0, first: false, renew: null };
+try {
+  const v = JSON.parse(localStorage.getItem('yicamLive') || 'null');
+  if (v) { LV.on = v.on !== false; if (EVERY.indexOf(v.every) >= 0) LV.every = v.every; }
+} catch (e) {}
+function saveLV() { try { localStorage.setItem('yicamLive', JSON.stringify({ on: LV.on, every: LV.every })); } catch (e) {} }
+function setLoading(on, text) { $('lload').hidden = !on; if (text) $('lloadT').textContent = text; }
+function renderLiveCtl() {
+  $('liveBtn').textContent = LV.on ? '⏸ Pause' : '▶ Live view';
+  const box = $('every'); box.textContent = '';
+  for (const v of EVERY) {
+    const b = document.createElement('button'); b.textContent = v + ' s'; b.className = v === LV.every ? 'sel' : '';
+    b.onclick = () => { LV.every = v; saveLV(); renderLiveCtl(); if (LV.on && !document.hidden) liveStart(true); schedulePoll(); };
     box.appendChild(b);
-  });
+  }
+}
+async function liveStart(keepFirst) {
+  if (!keepFirst) { LV.startedAt = Date.now(); LV.first = false; setLoading(true, 'Starting live view…'); }
+  try { renderState(await run('ui_live', 'start', LV.every)); } catch (e) { err(String(e.message || e)); }
+  clearInterval(LV.renew);
+  LV.renew = setInterval(() => { if (LV.on && !document.hidden) run('ui_live', 'start', LV.every).catch(() => {}); }, 60000);
+}
+async function liveStop() {
+  clearInterval(LV.renew); LV.renew = null;
+  setLoading(false);
+  try { await run('ui_live', 'stop'); } catch (e) {}
+}
+$('liveBtn').onclick = () => {
+  LV.on = !LV.on; saveLV(); renderLiveCtl();
+  if (LV.on) liveStart(); else liveStop();
+  schedulePoll();
+};
+// The loading text says when the bridge is expected to pick the request up.
+function liveLoadingText(s) {
+  if (!LV.on || LV.first) return;
+  const b = s.bridge, st = b && b.status || {};
+  const pollMs = (st.poll_s || 30) * 1000;
+  if (!b || s.now - b.seen > Math.max(90000, 3 * pollMs)) return setLoading(true, 'Bridge offline: the live view starts when it checks in again.');
+  const left = Math.max(1, Math.round((pollMs - (s.now - b.seen)) / 1000));
+  setLoading(true, st.remote && st.live ? 'Live view running, waiting for the next frame…'
+                                        : 'Waiting for the bridge (next check-in in ~' + left + ' s)…');
+}
+
+// --- Days and calendar ---
+let DAYMAP = {}, calMonth = null;
+async function refreshDays() {
+  try {
+    DAYS = await run('ui_days');
+    DAYMAP = {}; DAYS.forEach(d => DAYMAP[d.day] = d);
+    renderDayNav();
+  } catch (e) {}
+}
+function renderDayNav() {
+  if (!DAY) return;
+  const i = DAYS.findIndex(d => d.id === DAY.id);
+  $('dayBtn').textContent = dayLabel(DAY.day) + ' ▾';
+  $('prevDay').disabled = i < 0 || i >= DAYS.length - 1;  // DAYS is newest first
+  $('nextDay').disabled = i <= 0;
+  $('dayDrive').href = 'https://drive.google.com/drive/folders/' + DAY.id;
+  if (!$('cal').hidden) renderCal();
+}
+$('prevDay').onclick = () => { const i = DAYS.findIndex(d => d.id === DAY.id); if (DAYS[i + 1]) loadTimeline(DAYS[i + 1]); };
+$('nextDay').onclick = () => { const i = DAYS.findIndex(d => d.id === DAY.id); if (i > 0) loadTimeline(DAYS[i - 1]); };
+$('dayBtn').onclick = () => {
+  const c = $('cal');
+  c.hidden = !c.hidden;
+  if (!c.hidden) { const d = new Date((DAY ? DAY.day : localDay(new Date())) + 'T12:00:00'); calMonth = new Date(d.getFullYear(), d.getMonth(), 1); renderCal(); }
+};
+function renderCal() {
+  const c = $('cal'); c.textContent = '';
+  const y = calMonth.getFullYear(), mo = calMonth.getMonth();
+  const head = document.createElement('div'); head.className = 'calh';
+  const pb = document.createElement('button'); pb.textContent = '‹'; pb.onclick = () => { calMonth = new Date(y, mo - 1, 1); renderCal(); };
+  const nb = document.createElement('button'); nb.textContent = '›'; nb.onclick = () => { calMonth = new Date(y, mo + 1, 1); renderCal(); };
+  const title = document.createElement('span'); title.textContent = calMonth.toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
+  const days = Object.keys(DAYMAP).sort();
+  pb.disabled = !days.length || days[0] >= localDay(calMonth);
+  nb.disabled = !days.length || days[days.length - 1] < localDay(new Date(y, mo + 1, 1));
+  head.append(pb, title, nb); c.appendChild(head);
+  const g = document.createElement('div'); g.className = 'calg';
+  const monday = new Date(2024, 0, 1);  // a Monday, for weekday names
+  for (let k = 0; k < 7; k++) {
+    const i = document.createElement('i');
+    i.textContent = new Date(monday.getTime() + k * 86400000).toLocaleDateString(undefined, { weekday: 'narrow' });
+    g.appendChild(i);
+  }
+  const lead = (new Date(y, mo, 1).getDay() + 6) % 7;  // Monday first
+  for (let k = 0; k < lead; k++) g.appendChild(document.createElement('span'));
+  const today = localDay(new Date());
+  for (let d = 1; d <= new Date(y, mo + 1, 0).getDate(); d++) {
+    const key = localDay(new Date(y, mo, d));
+    const b = document.createElement('button'); b.textContent = d;
+    b.className = (DAYMAP[key] ? 'has' : '') + (key === today ? ' today' : '') + (DAY && DAY.day === key ? ' sel' : '');
+    b.disabled = !DAYMAP[key];
+    b.onclick = () => { $('cal').hidden = true; loadTimeline(DAYMAP[key]); };
+    g.appendChild(b);
+  }
+  c.appendChild(g);
 }
 
 async function loadTimeline(d, quiet) {
-  DAY = d; renderDays();
+  DAY = d; renderDayNav();
   if (!quiet) $('tl').innerHTML = '<div class="empty">Loading…</div>';
-  try { TL = await run('ui_timeline', d.id); renderTimeline(); }
+  try { TL = await run('ui_timeline', d.id); if (DAY && DAY.id === d.id) renderTimeline(); }
   catch (e) { $('tl').innerHTML = ''; const m = document.createElement('div'); m.className = 'empty';
     m.textContent = 'Could not load: ' + (e.message || e); $('tl').appendChild(m); }
 }
 
 function renderTimeline() {
   const box = $('tl'); box.textContent = '';
+  $('foot').textContent = '';
   if (!TL.events.length) { box.innerHTML = '<div class="empty">Nothing saved this day.</div>'; return; }
   const want = [];
   for (const ev of TL.events) {
@@ -184,29 +377,36 @@ function renderTimeline() {
     c.textContent = [ev.photos.length && ev.photos.length + ' photo' + (ev.photos.length > 1 ? 's' : ''),
                      ev.videos.length && ev.videos.length + ' clip' + (ev.videos.length > 1 ? 's' : '')].filter(Boolean).join(' · ');
     h.append(t, c); e.appendChild(h);
-    if (ev.photos.length) {
+    const photos = ev.photos.map(p => Object.assign({ kind: 'photo' }, p));
+    if (photos.length) {
       const g = document.createElement('div'); g.className = 'thumbs';
-      const shown = ev.photos.length > 8 ? ev.photos.slice(0, 7) : ev.photos;
-      for (const p of shown) {
+      const shown = photos.length > 8 ? photos.slice(0, 7) : photos;
+      shown.forEach((p, idx) => {
         const a = document.createElement('a'); a.href = p.url; a.title = p.name; a.dataset.id = p.id;
+        a.onclick = evt => { evt.preventDefault(); openViewer(photos, idx); };
         if (THUMBS[p.id]) a.style.backgroundImage = 'url("' + THUMBS[p.id] + '")'; else want.push(p.id);
         g.appendChild(a);
-      }
-      if (shown.length < ev.photos.length) {
+      });
+      if (shown.length < photos.length) {  // opens the viewer at the first hidden photo
         const a = document.createElement('a'); a.className = 'more'; a.href = TL.folderUrl;
-        a.textContent = '+' + (ev.photos.length - shown.length); g.appendChild(a);
+        a.textContent = '+' + (photos.length - shown.length);
+        a.onclick = evt => { evt.preventDefault(); openViewer(photos, shown.length); };
+        g.appendChild(a);
       }
       e.appendChild(g);
     }
     if (ev.videos.length) {
+      const clips = ev.videos.map(v => Object.assign({ kind: 'video' }, v));
       const cl = document.createElement('div'); cl.className = 'clips';
-      for (const v of ev.videos) { const a = document.createElement('a'); a.href = v.url; a.textContent = '▶ ' + v.time; cl.appendChild(a); }
+      clips.forEach((v, idx) => {
+        const a = document.createElement('a'); a.href = v.url; a.textContent = '▶ ' + v.time;
+        a.onclick = evt => { evt.preventDefault(); openViewer(clips, idx); };
+        cl.appendChild(a);
+      });
       e.appendChild(cl);
     }
     box.appendChild(e);
   }
-  $('foot').innerHTML = ''; const a = document.createElement('a'); a.href = TL.folderUrl; a.textContent = 'Open this day in Drive';
-  $('foot').appendChild(a);
   loadThumbs(want.filter(id => !thumbsAsked.has(id)));
 }
 
@@ -225,16 +425,88 @@ async function loadThumbs(ids) {
   }
 }
 
-async function start() {
-  poll();
-  try {
-    DAYS = await run('ui_days');
-    if (DAYS.length) loadTimeline(DAYS[0]); else $('tl').innerHTML = '<div class="empty">Nothing saved yet.</div>';
-  } catch (e) { $('tl').innerHTML = ''; err(String(e.message || e)); }
+// --- Viewer: photos and clips without leaving the page ---
+const MEDIA = {};  // photo data URLs already loaded
+const V = { items: [], i: 0, gen: 0, url: null };
+function openViewer(items, i) {
+  V.items = items; V.i = i;
+  $('modal').hidden = false; document.body.style.overflow = 'hidden';
+  showItem();
 }
-setInterval(() => { if (!document.hidden) poll(); }, 5000);
+function closeViewer() {
+  V.gen++; clearStage();
+  $('modal').hidden = true; document.body.style.overflow = '';
+}
+function clearStage() {
+  const v = $('mStage').querySelector('video');
+  if (v) { v.pause(); v.removeAttribute('src'); }
+  if (V.url) { URL.revokeObjectURL(V.url); V.url = null; }
+  $('mStage').textContent = '';
+}
+async function showItem() {
+  const it = V.items[V.i], g = ++V.gen;
+  clearStage();
+  $('mTitle').textContent = (it.kind === 'video' ? 'Clip · ' : 'Photo · ') + nameTime(it.name) +
+    (V.items.length > 1 ? '  (' + (V.i + 1) + '/' + V.items.length + ')' : '');
+  $('mDrive').href = it.url || '#';
+  $('mPrev').hidden = V.i <= 0; $('mNext').hidden = V.i >= V.items.length - 1;
+  const st = $('mStage');
+  const place = src => { st.textContent = ''; const im = document.createElement('img'); im.src = src; im.alt = it.name || ''; st.appendChild(im); };
+  if (it.kind !== 'video' && MEDIA[it.id]) return place(MEDIA[it.id]);
+  const msg = document.createElement('div'); msg.className = 'mmsg';
+  msg.textContent = it.kind === 'video' ? 'Loading clip (about 5 MB)…' : 'Loading…';
+  st.appendChild(msg);
+  try {
+    const m = await run('ui_media', it.id);
+    if (g !== V.gen) return;
+    if (!it.url) { it.url = m.url; $('mDrive').href = m.url; }
+    if (m.tooBig) { msg.textContent = 'This file is too large to show here. Use “Open in Drive”.'; return; }
+    if (it.kind === 'video') {
+      const bin = atob(m.data), arr = new Uint8Array(bin.length);
+      for (let k = 0; k < bin.length; k++) arr[k] = bin.charCodeAt(k);
+      V.url = URL.createObjectURL(new Blob([arr], { type: m.mime }));
+      const v = document.createElement('video');
+      v.controls = true; v.playsInline = true; v.autoplay = true; v.src = V.url;
+      st.textContent = ''; st.appendChild(v);
+    } else {
+      const src = 'data:' + m.mime + ';base64,' + m.data;
+      if (Object.keys(MEDIA).length > 40) for (const k in MEDIA) { delete MEDIA[k]; break; }
+      MEDIA[it.id] = src; place(src);
+    }
+  } catch (e) { if (g === V.gen) msg.textContent = 'Could not load it: ' + (e.message || e) + '. Try “Open in Drive”.'; }
+}
+const step = d => { const n = V.i + d; if (n >= 0 && n < V.items.length) { V.i = n; showItem(); } };
+$('mPrev').onclick = () => step(-1);
+$('mNext').onclick = () => step(1);
+$('mClose').onclick = closeViewer;
+document.addEventListener('keydown', e => {
+  if ($('modal').hidden) return;
+  if (e.key === 'Escape') closeViewer();
+  else if (e.key === 'ArrowLeft') step(-1);
+  else if (e.key === 'ArrowRight') step(1);
+});
+let touchX = null;
+$('mWrap').addEventListener('touchstart', e => { touchX = e.touches[0].clientX; }, { passive: true });
+$('mWrap').addEventListener('touchend', e => {
+  if (touchX === null) return;
+  const dx = e.changedTouches[0].clientX - touchX; touchX = null;
+  if (Math.abs(dx) > 50 && !$('mStage').querySelector('video')) step(dx < 0 ? 1 : -1);
+});
+
+async function start() {
+  renderLiveCtl();
+  if (LV.on) liveStart(); else setLoading(false);
+  poll();
+  await refreshDays();
+  if (DAYS.length) loadTimeline(DAYS[0]);
+  else $('tl').innerHTML = '<div class="empty">Nothing saved yet.</div>';
+}
+
 setInterval(() => { if (!document.hidden && DAY && DAYS[0] && DAY.id === DAYS[0].id) loadTimeline(DAY, true); }, 60000);
-document.addEventListener('visibilitychange', () => { if (!document.hidden) poll(); });
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) { clearTimeout(pollTimer); if (LV.on) liveStop(); }  // background: stop frames
+  else { poll(); if (LV.on) liveStart(); }
+});
 start();
 </script>
 </body>

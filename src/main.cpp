@@ -29,7 +29,7 @@
 #include "root_certs.h"
 #include "web_ui.h"
 
-static const char *FW_VERSION = "0.6.0";
+static const char *FW_VERSION = "0.7.0";
 static const char *HOSTNAME = "yicam-bridge";
 static const char *SETUP_AP_NAME = "YiCam-Setup";
 // The setup network's password is generated per device (see setupApPassword()).
@@ -233,7 +233,9 @@ volatile bool newMotionEvent = false;
 volatile bool manualShot = false;
 volatile bool captureBusy = false;  // worker is fetching a snapshot from the camera
 volatile bool remoteActive = false;   // a "capture for a while" request is running
-volatile bool remoteShot = false;     // the pending manual shot came from the control page
+volatile uint8_t remoteShotFlags = 0;  // flags for the pending manual shot (SLOT_REMOTE / SLOT_LIVE)
+volatile bool remoteLive = false;      // the running remote capture is the page's live view
+volatile uint32_t remoteEveryMs = 0;   // its interval (0 = the Settings interval)
 volatile uint32_t remoteUntilMs = 0;
 volatile time_t lastPollOkT = 0;      // last successful check-in with the Apps Script
 volatile uint32_t motionSinceMs = 0;
@@ -316,7 +318,8 @@ void onMotionMessage(const char *payload) {
 // delete recordings, not these files, so a fixed ring of names is reused, and a
 // slot is overwritten only once its photo is in Drive.
 static const int SLOTS = 30;
-static const uint8_t SLOT_REMOTE = 1;
+static const uint8_t SLOT_REMOTE = 1;  // requested from the control page (…-r.jpg)
+static const uint8_t SLOT_LIVE = 2;    // live-view frame from the control page (…-l.jpg)
 static const uint8_t SLOT_MAX_TRIES = 10;
 static const uint8_t VIDEO_MAX_TRIES = 5;
 static const uint32_t VIDEO_RETRY_MS = 60UL * 1000UL;
@@ -378,7 +381,7 @@ void cameraAuth(HTTPClient &http) {
   if (cfg.camUser.length()) http.setAuthorization(cfg.camUser.c_str(), cfg.camPass.c_str());
 }
 
-bool captureToCamera(uint8_t seq, bool remote) {
+bool captureToCamera(uint8_t seq, uint8_t flags) {
   int i = slotStore.next;
   if (slotStore.s[i].state == 1) {
     statDropped++;
@@ -419,7 +422,7 @@ bool captureToCamera(uint8_t seq, bool remote) {
     return false;
   }
   time_t now = time(nullptr);
-  slotStore.s[i] = {now > 1700000000 ? (uint32_t)now : 0, 1, 0, seq, (uint8_t)(remote ? SLOT_REMOTE : 0)};
+  slotStore.s[i] = {now > 1700000000 ? (uint32_t)now : 0, 1, 0, seq, flags};
   slotStore.next = (i + 1) % SLOTS;
   saveSlots();
   Serial.printf("[capture] slot %d (%s)\n", i, slotFile(i).c_str());
@@ -707,7 +710,7 @@ bool uploadSlot(int i) {
   char seq[4];
   snprintf(seq, sizeof(seq), "%02u", (unsigned)(sl.seq % 100));
   String name = (sl.t ? stamp : "notime-" + stamp) + "-" + seq +
-                ((sl.flags & SLOT_REMOTE) ? "-r" : "") + ".jpg";
+                ((sl.flags & SLOT_LIVE) ? "-l" : (sl.flags & SLOT_REMOTE) ? "-r" : "") + ".jpg";
   String folder = dayFolder(day);
   if (folder.isEmpty()) return false;
 
@@ -1031,6 +1034,7 @@ String pollBody() {
   j += "\"rssi\":" + String(WiFi.RSSI()) + ",";
   j += "\"motion\":" + String(motionActive ? "true" : "false") + ",";
   j += "\"remote\":" + String(remoteActive ? "true" : "false") + ",";
+  j += "\"live\":" + String(remoteActive && remoteLive ? "true" : "false") + ",";
   j += "\"events\":" + String(statEvents) + ",";
   j += "\"captured\":" + String(statCaptured) + ",";
   j += "\"uploaded\":" + String(statUploaded) + ",";
@@ -1077,20 +1081,36 @@ void pollRemote() {
     long secs = jsonNum(obj, "secs");
     if (type == "snap") {
       manualShot = true;
-      remoteShot = true;
+      remoteShotFlags = SLOT_REMOTE;
       Serial.println("[remote] snapshot requested");
-    } else if (type == "burst") {
+    } else if (type == "burst" || type == "live") {
+      bool live = type == "live";
       if (secs < 5) secs = 5;
       if (secs > 300) secs = 300;
+      long every = jsonNum(obj, "every");
+      if (every && every < 3) every = 3;
+      if (every > 60) every = 60;
+      bool wasLive = remoteActive && remoteLive;
       remoteUntilMs = millis() + (uint32_t)secs * 1000UL;
+      remoteEveryMs = live ? (uint32_t)every * 1000UL : 0;
+      remoteLive = live;
       remoteActive = true;
-      manualShot = true;  // first shot right away
-      remoteShot = true;
-      Serial.printf("[remote] capturing for %ld s\n", secs);
+      if (!wasLive) {  // first shot right away (a live renewal keeps its rhythm)
+        manualShot = true;
+        remoteShotFlags = live ? SLOT_LIVE : SLOT_REMOTE;
+      }
+      Serial.printf("[remote] %s for %ld s\n", live ? "live view" : "capturing", secs);
+    } else if (type == "stop") {
+      remoteActive = false;
+      remoteLive = false;
+      Serial.println("[remote] stopped");
     }
   }
   // Acknowledge new requests quickly so the page can show "picked up".
-  nextPollMs = millis() + (got ? 2000UL : cfg.pollSec * 1000UL);
+  // While the live view runs, check in every 10 s so frequency changes and
+  // Pause take effect quickly.
+  uint32_t interval = (remoteActive && remoteLive && cfg.pollSec > 10) ? 10 : cfg.pollSec;
+  nextPollMs = millis() + (got ? 2000UL : interval * 1000UL);
 }
 
 // ---------------------------------------------------------------------------
@@ -1114,21 +1134,28 @@ void workerTask(void *) {
       motionActive = false;
     }
 
-    if (remoteActive && (int32_t)(now - remoteUntilMs) >= 0) remoteActive = false;
+    if (remoteActive && (int32_t)(now - remoteUntilMs) >= 0) {
+      remoteActive = false;
+      remoteLive = false;
+    }
+    uint32_t remoteInterval = remoteEveryMs ? remoteEveryMs : cfg.intervalSec * 1000UL;
 
     bool dueMotion = motionActive && shotsThisEvent < cfg.maxShots &&
                      (lastShotMs == 0 || now - lastShotMs >= cfg.intervalSec * 1000UL);
     // A "capture for a while" request from the control page uses the same
     // interval and shares the schedule with motion, so shots never double up.
-    bool dueRemote = remoteActive && now - lastShotMs >= cfg.intervalSec * 1000UL;
+    bool dueRemote = remoteActive && now - lastShotMs >= remoteInterval;
     if (manualShot || dueMotion || dueRemote) {
       if (dueMotion) shotsThisEvent++;
       lastShotMs = now;
-      bool remote = remoteShot || (dueRemote && !dueMotion);
+      // Motion shots stay plain; remote ones are marked -r, live frames -l.
+      uint8_t flags = remoteShotFlags;
+      if (!flags && dueRemote && !dueMotion) flags = remoteLive ? SLOT_LIVE : SLOT_REMOTE;
+      if (dueMotion) flags = 0;
       manualShot = false;
-      remoteShot = false;
+      remoteShotFlags = 0;
       captureBusy = true;
-      bool ok = captureToCamera((uint8_t)(seq++ % 100), remote);
+      bool ok = captureToCamera((uint8_t)(seq++ % 100), flags);
       captureBusy = false;
       if (ok) {
         statCaptured++;
@@ -1141,7 +1168,8 @@ void workerTask(void *) {
 
     // Don't start an upload right before the next shot is due.
     bool capturing = (motionActive && shotsThisEvent < cfg.maxShots) || remoteActive;
-    bool captureSoon = capturing && millis() - lastShotMs + 1500 >= cfg.intervalSec * 1000UL;
+    uint32_t nextInterval = (motionActive && shotsThisEvent < cfg.maxShots) ? cfg.intervalSec * 1000UL : remoteInterval;
+    bool captureSoon = capturing && millis() - lastShotMs + 1500 >= nextInterval;
     if (!captureSoon && WiFi.isConnected()) {
       int slot = oldestPendingSlot();
       if (cfg.remoteOn && cfg.scriptUrl.length() && (int32_t)(millis() - nextPollMs) >= 0) {

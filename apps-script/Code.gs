@@ -87,6 +87,7 @@ function doPost(e) {
     } catch (err) {
       console.error('notification not queued: ' + err);  // never fail the upload over it
     }
+    rememberLatest_(file.id, name);
     return json_({ ok: true, id: file.id, name: name, size: bytes.length });
   } catch (err) {
     return json_({ ok: false, error: String(err) });
@@ -124,19 +125,26 @@ function handleSaved_(body) {
   if (!Array.isArray(files)) return { ok: false, error: 'bad json' };
   let n = 0;
   let remotePhotos = 0;
+  let newest = null;
+  let liveFolder = null;
   for (const f of files.slice(0, 50)) {
     if (!f || typeof f.id !== 'string' || typeof f.folder !== 'string') continue;
     const name = sanitizeName_(f.name) || f.id;
+    const live = f.kind !== 'video' && /-l\.jpe?g$/i.test(name);
     if (f.kind !== 'video' && /-r\.jpe?g$/i.test(name)) remotePhotos++;
+    if (f.kind !== 'video' && (!newest || name > newest.name)) newest = { id: f.id, name: name };
+    if (live) liveFolder = f.folder;
     try {
       if (f.kind === 'video') noteVideo_(f.id, name);
-      else queueNotification_(f.id, name, f.folder);
+      else if (!live) queueNotification_(f.id, name, f.folder);  // live-view frames never email
       n++;
     } catch (err) {
       console.error('notification not queued: ' + err);
     }
   }
   if (remotePhotos) creditRemotePhotos_(remotePhotos);
+  if (newest) rememberLatest_(newest.id, newest.name);
+  if (liveFolder) pruneLiveFrames_(liveFolder);
   return { ok: true, noted: n };
 }
 
@@ -144,7 +152,7 @@ function handleSaved_(body) {
  * Opened by you (deployment "Only myself", signed in): the control page.
  * Anyone else, e.g. the bridge's own deployment opened anonymously: a health check.
  */
-const CODE_VERSION = '0.6.2';
+const CODE_VERSION = '0.7.1';
 
 function doGet(e) {
   // ?diag=1: why the control page does or doesn't open. Only yes/no answers,
@@ -211,7 +219,7 @@ function handlePoll_(body) {
     if (changed || cmds.length !== n) props.setProperty('COMMANDS', JSON.stringify(cmds));
     return {
       ok: true,
-      commands: cmds.filter(c => c.state === 'queued').map(c => ({ id: c.id, type: c.type, secs: c.secs || 0 })),
+      commands: cmds.filter(c => c.state === 'queued').map(c => ({ id: c.id, type: c.type, secs: c.secs || 0, every: c.every || 0 })),
     };
   });
 }
@@ -252,7 +260,9 @@ function ui_state() {
   requireOwner_();
   const bridge = JSON.parse(CacheService.getScriptCache().get('BRIDGE') || 'null');
   const cmds = JSON.parse(PropertiesService.getScriptProperties().getProperty('COMMANDS') || '[]');
-  return { now: Date.now(), bridge: bridge, commands: cmds.slice(-4).reverse(), cmdTtlMs: CMD_TTL_MS };
+  const shown = cmds.filter(c => c.type !== 'live' && c.type !== 'stop');
+  return { now: Date.now(), bridge: bridge, commands: shown.slice(-4).reverse(), cmdTtlMs: CMD_TTL_MS,
+           latest: latestPhoto_() };
 }
 
 function ui_capture(kind) {
@@ -319,6 +329,7 @@ function ui_timeline(dayId) {
     (res.files || []).forEach(f => {
       const isVideo = /^video\//.test(f.mimeType);
       if (!isVideo && !/^image\//.test(f.mimeType)) return;
+      if (/-l\.jpe?g$/i.test(f.name)) return;  // live-view frames aren't events
       const m = /^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})/.exec(f.name);
       const t = m ? Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6])  // local time, as UTC fields
                   : new Date(f.createdTime).getTime();
@@ -348,9 +359,102 @@ function ui_timeline(dayId) {
     events: events.reverse().map(e => ({
       start: hhmm(e.start), end: hhmm(e.end),
       remote: e.photos.length > 0 && e.photos.every(p => p.remote),
-      photos: e.photos, videos: e.videos.map(v => ({ id: v.id, url: v.url, time: hhmm(v.t) })),
+      photos: e.photos, videos: e.videos.map(v => ({ id: v.id, url: v.url, name: v.name, time: hhmm(v.t) })),
     })),
   };
+}
+
+/**
+ * Live view from the control page: the bridge takes a frame every `every`
+ * seconds for the next 2 minutes; the open page renews it every minute and
+ * stops it when paused or hidden. Only one live request waits at a time.
+ */
+function ui_live(action, every) {
+  requireOwner_();
+  every = Math.max(3, Math.min(60, Number(every) || 5));
+  withLock_(() => {
+    const props = PropertiesService.getScriptProperties();
+    const now = Date.now();
+    let cmds = JSON.parse(props.getProperty('COMMANDS') || '[]')
+      .filter(c => now - c.created < CMD_KEEP_MS)
+      .filter(c => !(c.state === 'queued' && (c.type === 'live' || c.type === 'stop')));  // superseded
+    const id = now.toString(36) + Math.floor(Math.random() * 1e6).toString(36);
+    if (action === 'start') cmds.push({ id: id, type: 'live', secs: 120, every: every, created: now, state: 'queued' });
+    else cmds.push({ id: id, type: 'stop', secs: 0, created: now, state: 'queued' });
+    props.setProperty('COMMANDS', JSON.stringify(cmds.slice(-20)));
+  });
+  return ui_state();
+}
+
+/** Deletes live-view frames older than 15 minutes in a day folder (at most every 5 minutes). */
+function pruneLiveFrames_(folderId) {
+  const cache = CacheService.getScriptCache();
+  if (cache.get('LIVE_PRUNED_' + folderId)) return;
+  cache.put('LIVE_PRUNED_' + folderId, '1', 300);
+  try {
+    const cutoff = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+    const res = Drive.Files.list({
+      q: `'${folderId}' in parents and name contains '-l.jp' and createdTime < '${cutoff}' and trashed = false`,
+      fields: 'files(id, name)', pageSize: 200,
+    });
+    (res.files || []).forEach(f => {
+      if (/-l\.jpe?g$/i.test(f.name)) Drive.Files.update({ trashed: true }, f.id);
+    });
+  } catch (err) {
+    console.error('live frame cleanup: ' + err);
+  }
+}
+
+/** The newest photo, for the page's "latest" panel. Kept in the script cache. */
+function rememberLatest_(id, name) {
+  try {  // best effort: never fails an upload report
+    const cache = CacheService.getScriptCache();
+    const cur = JSON.parse(cache.get('LATEST') || 'null');
+    if (cur && cur.name > name) return;  // an older photo reported late
+    cache.put('LATEST', JSON.stringify({ id: id, name: name }), 21600);
+  } catch (err) {
+    console.error('latest photo not recorded: ' + err);
+  }
+}
+
+function latestPhoto_() {
+  const cache = CacheService.getScriptCache();
+  const cur = JSON.parse(cache.get('LATEST') || 'null');
+  if (cur) return cur;
+  try {  // cache expired: look it up once (drive.file: only the script's own files)
+    const res = Drive.Files.list({
+      q: "mimeType = 'image/jpeg' and trashed = false",
+      orderBy: 'createdTime desc', fields: 'files(id, name)', pageSize: 1,
+    });
+    const f = res.files && res.files[0];
+    if (!f) return null;
+    cache.put('LATEST', JSON.stringify({ id: f.id, name: f.name }), 21600);
+    return { id: f.id, name: f.name };
+  } catch (err) {
+    return null;
+  }
+}
+
+/**
+ * A photo or clip itself, for the page's viewer: base64 plus its Drive link.
+ * Photos are ~150 KB and clips ~5 MB; anything over 25 MB is only linked.
+ */
+function ui_media(id) {
+  requireOwner_();
+  id = String(id);
+  if (!/^[A-Za-z0-9_-]{10,100}$/.test(id)) throw new Error('Bad id');
+  const f = Drive.Files.get(id, { fields: 'id, name, mimeType, size, webViewLink' });  // own files only
+  if (!/^(image|video)\//.test(f.mimeType)) throw new Error('Not a photo or clip');
+  const out = { id: f.id, name: f.name, mime: f.mimeType, url: f.webViewLink };
+  if (Number(f.size || 0) > 25 * 1024 * 1024) {
+    out.tooBig = true;
+    return out;
+  }
+  const r = UrlFetchApp.fetch('https://www.googleapis.com/drive/v3/files/' + encodeURIComponent(f.id) + '?alt=media',
+    { headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() }, muteHttpExceptions: true });
+  if (r.getResponseCode() !== 200) throw new Error('Drive answered HTTP ' + r.getResponseCode());
+  out.data = Utilities.base64Encode(r.getBlob().getBytes());
+  return out;
 }
 
 /** Small thumbnails as data URLs, for up to 12 of the script's own files. */
