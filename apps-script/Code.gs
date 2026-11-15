@@ -152,7 +152,7 @@ function handleSaved_(body) {
  * Opened by you (deployment "Only myself", signed in): the control page.
  * Anyone else, e.g. the bridge's own deployment opened anonymously: a health check.
  */
-const CODE_VERSION = '0.8.0';
+const CODE_VERSION = '0.8.1';
 
 function doGet(e) {
   // ?diag=1: why the control page does or doesn't open. Only yes/no answers,
@@ -263,14 +263,12 @@ function ui_state(liveEvery) {
   const bridge = JSON.parse(CacheService.getScriptCache().get('BRIDGE') || 'null');
   const cmds = JSON.parse(PropertiesService.getScriptProperties().getProperty('COMMANDS') || '[]');
   const shown = cmds.filter(c => c.type !== 'live' && c.type !== 'stop');
+  // The newest photo in Drive: live frames aren't reported by the bridge (it
+  // saves it two connections per frame), so ask Drive rather than relying on
+  // reports. Reports still serve as a fallback.
   let latest = latestPhoto_();
-  // Live frames aren't reported by the bridge (it saves it two connections per
-  // frame); while the live view runs, find the newest one in Drive.
-  const st = bridge && bridge.status;
-  if (st && (st.live || st.remote) && Date.now() - bridge.seen < 5 * 60 * 1000) {
-    const lv = newestLiveFrame_();
-    if (lv && (!latest || lv.name > latest.name)) latest = lv;
-  }
+  const nw = newestPhoto_();
+  if (nw && (!latest || nw.name > latest.name)) latest = nw;
   return { now: Date.now(), bridge: bridge, commands: shown.slice(-4).reverse(), cmdTtlMs: CMD_TTL_MS,
            latest: latest };
 }
@@ -401,23 +399,27 @@ function ui_live(action, every) {
   return ui_state();
 }
 
-/** Newest live-view frame of the last 10 minutes (looked up at most every 2 s). */
-function newestLiveFrame_() {
+/**
+ * Newest photo of the last 30 minutes, by creation time (looked up at most
+ * every 2 s). No name search: Drive's `name contains` only matches the start
+ * of words, so it can't find the "-l.jpg" suffix.
+ */
+function newestPhoto_() {
   const cache = CacheService.getScriptCache();
-  const hit = cache.get('LIVE_NEWEST');
+  const hit = cache.get('NEWEST');
   if (hit) return JSON.parse(hit);
   try {
-    const since = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    const since = new Date(Date.now() - 30 * 60 * 1000).toISOString();
     const res = Drive.Files.list({
-      q: `name contains '-l.jp' and mimeType = 'image/jpeg' and trashed = false and createdTime > '${since}'`,
+      q: `mimeType = 'image/jpeg' and trashed = false and createdTime > '${since}'`,
       orderBy: 'createdTime desc', fields: 'files(id, name, parents)', pageSize: 1,
     });
     const f = res.files && res.files[0];
     const out = f ? { id: f.id, name: f.name } : null;
-    cache.put('LIVE_NEWEST', JSON.stringify(out), 2);
+    cache.put('NEWEST', JSON.stringify(out), 2);
     if (f) {
       rememberLatest_(f.id, f.name);
-      if (f.parents && f.parents[0]) pruneLiveFrames_(f.parents[0]);
+      if (/-l\.jpe?g$/i.test(f.name) && f.parents && f.parents[0]) pruneLiveFrames_(f.parents[0]);
     }
     return out;
   } catch (err) {
@@ -432,9 +434,9 @@ function pruneLiveFrames_(folderId) {
   cache.put('LIVE_PRUNED_' + folderId, '1', 300);
   try {
     const cutoff = new Date(Date.now() - 15 * 60 * 1000).toISOString();
-    const res = Drive.Files.list({
-      q: `'${folderId}' in parents and name contains '-l.jp' and createdTime < '${cutoff}' and trashed = false`,
-      fields: 'files(id, name)', pageSize: 200,
+    const res = Drive.Files.list({  // filtered by name below: `name contains` can't match a suffix
+      q: `'${folderId}' in parents and mimeType = 'image/jpeg' and createdTime < '${cutoff}' and trashed = false`,
+      fields: 'files(id, name)', pageSize: 500,
     });
     (res.files || []).forEach(f => {
       if (/-l\.jpe?g$/i.test(f.name)) Drive.Files.update({ trashed: true }, f.id);
