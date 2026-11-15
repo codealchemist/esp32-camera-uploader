@@ -29,7 +29,7 @@
 #include "root_certs.h"
 #include "web_ui.h"
 
-static const char *FW_VERSION = "0.8.0";
+static const char *FW_VERSION = "0.8.1";
 static const char *HOSTNAME = "yicam-bridge";
 static const char *SETUP_AP_NAME = "YiCam-Setup";
 // The setup network's password is generated per device (see setupApPassword()).
@@ -238,6 +238,8 @@ volatile bool remoteLive = false;      // the running remote capture is the page
 volatile uint32_t remoteEveryMs = 0;   // its interval (0 = the Settings interval)
 volatile uint32_t remoteUntilMs = 0;
 volatile time_t lastPollOkT = 0;      // last successful check-in with the Apps Script
+volatile uint32_t lastNetOkMs = 0;     // last successful check-in or upload (network watchdog)
+TaskHandle_t workerHandle = nullptr, pollHandle = nullptr;
 volatile uint32_t motionSinceMs = 0;
 
 volatile uint32_t statEvents = 0, statCaptured = 0, statCaptureFail = 0,
@@ -909,6 +911,7 @@ bool uploadSlot(int i) {
   // the page asks, which saves the bridge two connections per frame.
   if (!(sl.flags & SLOT_LIVE)) reportSaved(id, name, folder, "photo");
   setText(lastUploaded, name);
+  lastNetOkMs = millis();
   Serial.printf("[upload] %s -> Drive (%ld bytes) in %lu ms: token %lu, folder %lu, camera %lu, drive %lu\n",
                 name.c_str(), len, (unsigned long)(millis() - t0), (unsigned long)(tTok - t0),
                 (unsigned long)(tFolder - tTok), (unsigned long)(tCam - tFolder), (unsigned long)(millis() - tCam));
@@ -1257,6 +1260,7 @@ void pollRemote() {
   }
   pollBackoffS = 0;
   lastPollOkT = time(nullptr);
+  lastNetOkMs = millis();
   pendingAcks = "";  // delivered
 
   bool got = false;
@@ -2112,6 +2116,12 @@ void setup() {
   Serial.begin(115200);
   delay(200);
   Serial.printf("\n[boot] yicam-bridge %s\n", FW_VERSION);
+  // Why the last run ended: crash (panic/watchdog), brownout, our own restart…
+  static const char *reasons[] = {"unknown", "power-on", "external", "software restart", "crash (panic)",
+                                  "interrupt watchdog", "task watchdog", "other watchdog", "deep sleep",
+                                  "brownout", "SDIO"};
+  int rr = (int)esp_reset_reason();
+  Serial.printf("[boot] last reset: %s\n", rr >= 0 && rr <= 10 ? reasons[rr] : "?");
   pinMode(LED_PIN, OUTPUT);
   pinMode(BOOT_BUTTON_PIN, INPUT_PULLUP);
   textMutex = xSemaphoreCreateMutex();
@@ -2163,16 +2173,52 @@ void setup() {
   mqtt.begin();
   setupWeb();
 
-  xTaskCreatePinnedToCore(workerTask, "worker", 16384, nullptr, 1, nullptr, 1);
+  xTaskCreatePinnedToCore(workerTask, "worker", 16384, nullptr, 1, &workerHandle, 1);
   // 20 KB: an Apps Script call keeps two TLS clients (several KB each) on the stack.
-  xTaskCreatePinnedToCore(pollTask, "poll", 20480, nullptr, 1, nullptr, 0);
+  xTaskCreatePinnedToCore(pollTask, "poll", 20480, nullptr, 1, &pollHandle, 0);
+  lastNetOkMs = millis();
   Serial.println("[boot] ready");
+}
+
+// Health line every 30 s, and a network watchdog: force a Wi-Fi reconnect
+// after 60 s disconnected; restart if nothing has reached Google for 10 min
+// while Wi-Fi claims to be up (state that matters is kept in NVS).
+void watchdogs() {
+  static uint32_t lastHealth = 0, wifiDownSince = 0;
+  uint32_t now = millis();
+  if (now - lastHealth >= 30000) {
+    lastHealth = now;
+    Serial.printf("[health] up %lus heap %u min %u maxblk %u wifi %d rssi %d stack free: worker %u poll %u loop %u\n",
+                  (unsigned long)(now / 1000), ESP.getFreeHeap(), ESP.getMinFreeHeap(), ESP.getMaxAllocHeap(),
+                  (int)WiFi.status(), WiFi.RSSI(),
+                  workerHandle ? (unsigned)uxTaskGetStackHighWaterMark(workerHandle) : 0,
+                  pollHandle ? (unsigned)uxTaskGetStackHighWaterMark(pollHandle) : 0,
+                  (unsigned)uxTaskGetStackHighWaterMark(nullptr));
+  }
+  if (WiFi.status() != WL_CONNECTED) {
+    if (!wifiDownSince) wifiDownSince = now;
+    if (now - wifiDownSince > 60000) {
+      Serial.println("[watchdog] Wi-Fi down for 60 s, reconnecting");
+      WiFi.disconnect();
+      WiFi.reconnect();
+      wifiDownSince = now;
+    }
+  } else {
+    wifiDownSince = 0;
+    // Only with check-ins on: they're what keeps lastNetOkMs fresh on a quiet day.
+    if (cfg.remoteOn && cfg.scriptUrl.length() && now - lastNetOkMs > 10UL * 60 * 1000) {
+      Serial.println("[watchdog] nothing reached Google for 10 min with Wi-Fi up, restarting");
+      delay(200);
+      ESP.restart();
+    }
+  }
 }
 
 void loop() {
   mqtt.loop();
   web.handleClient();
   ArduinoOTA.handle();
+  watchdogs();
   if (restartAtMs && (int32_t)(millis() - restartAtMs) >= 0) ESP.restart();
   delay(1);
 }
