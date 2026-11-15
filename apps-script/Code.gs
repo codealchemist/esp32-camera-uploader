@@ -152,7 +152,7 @@ function handleSaved_(body) {
  * Opened by you (deployment "Only myself", signed in): the control page.
  * Anyone else, e.g. the bridge's own deployment opened anonymously: a health check.
  */
-const CODE_VERSION = '0.8.1';
+const CODE_VERSION = '0.9.0';
 
 function doGet(e) {
   // ?diag=1: why the control page does or doesn't open. Only yes/no answers,
@@ -257,9 +257,9 @@ function requireOwner_() {
   if (!isOwner_()) throw new Error('Not allowed. Open this page signed in as the script owner.');
 }
 
-function ui_state(liveEvery) {
+function ui_state(liveEvery, device) {
   requireOwner_();
-  if (Number(liveEvery) > 0) setLivePresence_(liveEvery);  // the open page is the heartbeat
+  if (Number(liveEvery) > 0) setLivePresence_(liveEvery, device);  // the open page is the heartbeat
   const bridge = JSON.parse(CacheService.getScriptCache().get('BRIDGE') || 'null');
   const cmds = JSON.parse(PropertiesService.getScriptProperties().getProperty('COMMANDS') || '[]');
   const shown = cmds.filter(c => c.type !== 'live' && c.type !== 'stop');
@@ -270,7 +270,7 @@ function ui_state(liveEvery) {
   const nw = newestPhoto_();
   if (nw && (!latest || nw.name > latest.name)) latest = nw;
   return { now: Date.now(), bridge: bridge, commands: shown.slice(-4).reverse(), cmdTtlMs: CMD_TTL_MS,
-           latest: latest };
+           latest: latest, live: currentLive_() };
 }
 
 function ui_capture(kind) {
@@ -373,29 +373,59 @@ function ui_timeline(dayId) {
 }
 
 /**
- * Live view = presence. While the control page is open and in the foreground,
- * every status request it makes says "watching, a frame every N s"; that's
- * kept for 30 s. Each bridge check-in reads the current state: live with its
- * interval, or nobody watching. No commands to acknowledge, lose or repeat.
+ * Live view = presence, per device. Each open control page (a random id kept
+ * in that browser) says "watching, a frame every N s" with every status
+ * request; each entry expires 30 s after its last request. A bridge check-in
+ * gets "live" while any device is watching, at the fastest interval asked
+ * for. Pause or leaving the page removes only that device's entry. When the
+ * last entry is gone, the next check-in says nobody is watching and the
+ * bridge stops (and it stops by itself if it doesn't hear "live" for a while).
  */
 const LIVE_PRESENCE_MS = 30 * 1000;
-const LIVE_LEASE_S = 40;  // the bridge keeps going this long after a check-in that says "live"
+const LIVE_LEASE_S = 40;  // the bridge holds the live view at least this long after a "live" check-in
 
-function setLivePresence_(every) {
+function cleanDevice_(device) {
+  const d = String(device || 'default');
+  return /^[A-Za-z0-9_-]{1,40}$/.test(d) ? d : 'default';
+}
+
+// Read-modify-write of the device map, under the script lock.
+function updateLiveMap_(fn) {
+  withLock_(() => {
+    const cache = CacheService.getScriptCache();
+    const map = JSON.parse(cache.get('LIVE_MAP') || '{}');
+    fn(map);
+    const now = Date.now();
+    for (const k in map) if (now - map[k].at >= LIVE_PRESENCE_MS) delete map[k];
+    if (Object.keys(map).length) cache.put('LIVE_MAP', JSON.stringify(map), 120);
+    else cache.remove('LIVE_MAP');
+  });
+}
+
+function setLivePresence_(every, device) {
   every = Math.max(3, Math.min(60, Number(every) || 5));
-  CacheService.getScriptCache().put('LIVE', JSON.stringify({ every: every, at: Date.now() }), 120);
+  const d = cleanDevice_(device);
+  updateLiveMap_(map => { map[d] = { every: every, at: Date.now() }; });
 }
 
 function currentLive_() {
-  const p = JSON.parse(CacheService.getScriptCache().get('LIVE') || 'null');
-  return p && Date.now() - p.at < LIVE_PRESENCE_MS ? { every: p.every, secs: LIVE_LEASE_S } : null;
+  const map = JSON.parse(CacheService.getScriptCache().get('LIVE_MAP') || '{}');
+  const now = Date.now();
+  let every = 0, watchers = 0;
+  for (const k in map) {
+    if (now - map[k].at >= LIVE_PRESENCE_MS) continue;
+    watchers++;
+    every = every ? Math.min(every, map[k].every) : map[k].every;
+  }
+  return watchers ? { every: every, secs: LIVE_LEASE_S, watchers: watchers } : null;
 }
 
-/** Start/stop now (Pause, frequency change), without waiting for the next status request. */
-function ui_live(action, every) {
+/** Start/stop for this device now (Pause, frequency change, leaving the page). */
+function ui_live(action, every, device) {
   requireOwner_();
-  if (action === 'start') setLivePresence_(every);
-  else CacheService.getScriptCache().remove('LIVE');
+  const d = cleanDevice_(device);
+  if (action === 'start') setLivePresence_(every, d);
+  else updateLiveMap_(map => { delete map[d]; });
   return ui_state();
 }
 

@@ -202,7 +202,7 @@ function schedulePoll() {
   pollTimer = setTimeout(poll, LV.on ? Math.min(5, LV.every) * 1000 : 5000);
 }
 async function poll() {
-  try { renderState(await run('ui_state', LV.on && !document.hidden ? LV.every : 0)); }
+  try { renderState(await run('ui_state', LV.on && !document.hidden ? LV.every : 0, DEVICE)); }
   catch (e) { err(String(e.message || e)); }
   schedulePoll();
 }
@@ -278,6 +278,13 @@ function updateStale() {
 // --- Live view: frames every N s while the page is open and visible ---
 const EVERY = [3, 5, 10, 30];
 const LV = { on: true, every: 5, startedAt: 0, first: false, renew: null };
+// A random id for this browser, so each device's live view is tracked separately.
+let DEVICE = '';
+try { DEVICE = localStorage.getItem('yicamDevice') || ''; } catch (e) {}
+if (!/^[A-Za-z0-9_-]{8,40}$/.test(DEVICE)) {
+  DEVICE = Math.random().toString(36).slice(2, 12) + Date.now().toString(36);
+  try { localStorage.setItem('yicamDevice', DEVICE); } catch (e) {}
+}
 try {
   const v = JSON.parse(localStorage.getItem('yicamLive') || 'null');
   if (v) { LV.on = v.on !== false; if (EVERY.indexOf(v.every) >= 0) LV.every = v.every; }
@@ -312,13 +319,13 @@ function renderLiveCtl() {
 // The page's own status requests are the live view's heartbeat (see poll()).
 async function liveStart(keepFirst) {
   if (!keepFirst) { LV.startedAt = Date.now(); LV.first = false; setLoading(true, 'Starting live view…'); updateStale(); }
-  try { renderState(await run('ui_live', 'start', LV.every)); } catch (e) { err(String(e.message || e)); }
+  try { renderState(await run('ui_live', 'start', LV.every, DEVICE)); } catch (e) { err(String(e.message || e)); }
   schedulePoll();
 }
 async function liveStop() {
   setLoading(false); TM.end = 0; updateStale();
   $('latestStat').textContent = 'paused';
-  try { await run('ui_live', 'stop'); } catch (e) {}
+  try { await run('ui_live', 'stop', 0, DEVICE); } catch (e) {}
 }
 $('liveBtn').onclick = () => {
   LV.on = !LV.on; saveLV(); renderLiveCtl();
@@ -337,7 +344,10 @@ function liveLoadingText(s) {
     if (!LV.first) TM.end = 0;
     return setLoading(true, 'Bridge offline: the live view starts when it checks in again.');
   }
-  if (LV.first) { stat.textContent = 'every ' + LV.every + ' s' + queued; return; }
+  const lv = s.live;
+  const others = lv && lv.watchers > 1 ? ' · ' + lv.watchers + ' watching' : '';
+  const rate = lv && lv.every < LV.every ? lv.every : LV.every;  // another device may ask for faster
+  if (LV.first) { stat.textContent = 'every ' + rate + ' s' + others + queued; return; }
   if (st.remote && st.live) {
     stat.textContent = 'starting · every ' + LV.every + ' s' + queued;
     if (!TM.end || Date.now() > TM.end + 1500) timerStart(LV.every * 1000);

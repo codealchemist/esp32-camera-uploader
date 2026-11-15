@@ -81,7 +81,8 @@ To test it, run `testNotification` in the editor. You should get a "[Test] YiCam
 
 A second deployment of the same script gives you a page, signed in with your Google account, with:
 - **Live view:** while the page is open and in the foreground, the bridge takes a frame every 3, 5, 10 or 30 s (your choice, remembered on each device), and the panel shows the newest one. **Pause** stops it.
-  - How it works: the page's regular status requests tell the script "watching, a frame every N s". Each bridge check-in (every 30 s) reads that state: live, or nobody watching. Frames keep coming between check-ins; Pause reaches the bridge at its next check-in.
+  - How it works: each open control page has its own random id in that browser, and its regular status requests tell the script "this device is watching, a frame every N s". Each entry expires 30 s after its last request. A bridge check-in (every 30 s) gets "live" while any device is watching, at the fastest interval asked for, or "nobody watching".
+  - Pause, switching apps or locking the phone removes only that device. When the last page closes, the bridge stops within about a minute: the entry expires within 30 s, and the next check-in is at most 30 s later. If check-ins fail, the bridge still stops by itself after 75 s without hearing "live".
   - It also stops when you switch apps or lock the phone, and by itself about a minute after the page is closed.
   - A spinner only shows when there's no image at all yet. The first frame arrives within one check-in.
   - Frames are named `…-l.jpg` and kept out of emails and the timeline, and frames older than 15 minutes are deleted.
