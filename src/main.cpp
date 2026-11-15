@@ -29,7 +29,7 @@
 #include "root_certs.h"
 #include "web_ui.h"
 
-static const char *FW_VERSION = "0.5.2";
+static const char *FW_VERSION = "0.6.0";
 static const char *HOSTNAME = "yicam-bridge";
 static const char *SETUP_AP_NAME = "YiCam-Setup";
 // The setup network's password is generated per device (see setupApPassword()).
@@ -58,6 +58,8 @@ struct Config {
   String dashHash;  // PBKDF2 hash of the dashboard password; empty = no login
   bool videoOn = true;      // upload the camera's motion video clips
   uint32_t videoCap = 50;   // clips per day at most
+  bool remoteOn = true;     // check in with the Apps Script for control-page requests
+  uint32_t pollSec = 30;    // seconds between check-ins
 } cfg;
 
 Preferences prefs;
@@ -80,7 +82,11 @@ void loadConfig() {
   cfg.dashHash = prefs.getString("dashHash", cfg.dashHash);
   cfg.videoOn = prefs.getBool("videoOn", cfg.videoOn);
   cfg.videoCap = prefs.getUInt("videoCap", cfg.videoCap);
+  cfg.remoteOn = prefs.getBool("remoteOn", cfg.remoteOn);
+  cfg.pollSec = prefs.getUInt("pollSec", cfg.pollSec);
   prefs.end();
+  if (cfg.pollSec < 15) cfg.pollSec = 15;
+  if (cfg.pollSec > 300) cfg.pollSec = 300;
   if (cfg.intervalSec < 1) cfg.intervalSec = 1;
   if (cfg.maxShots < 1) cfg.maxShots = 1;
   if (cfg.res != "low") cfg.res = "high";
@@ -107,6 +113,8 @@ void saveConfig(const Config &c = cfg) {
   prefs.putString("dashHash", c.dashHash);
   prefs.putBool("videoOn", c.videoOn);
   prefs.putUInt("videoCap", c.videoCap);
+  prefs.putBool("remoteOn", c.remoteOn);
+  prefs.putUInt("pollSec", c.pollSec);
   prefs.end();
 }
 
@@ -224,6 +232,10 @@ volatile bool motionActive = false;
 volatile bool newMotionEvent = false;
 volatile bool manualShot = false;
 volatile bool captureBusy = false;  // worker is fetching a snapshot from the camera
+volatile bool remoteActive = false;   // a "capture for a while" request is running
+volatile bool remoteShot = false;     // the pending manual shot came from the control page
+volatile uint32_t remoteUntilMs = 0;
+volatile time_t lastPollOkT = 0;      // last successful check-in with the Apps Script
 volatile uint32_t motionSinceMs = 0;
 
 volatile uint32_t statEvents = 0, statCaptured = 0, statCaptureFail = 0,
@@ -304,6 +316,7 @@ void onMotionMessage(const char *payload) {
 // delete recordings, not these files, so a fixed ring of names is reused, and a
 // slot is overwritten only once its photo is in Drive.
 static const int SLOTS = 30;
+static const uint8_t SLOT_REMOTE = 1;
 static const uint8_t SLOT_MAX_TRIES = 10;
 static const uint8_t VIDEO_MAX_TRIES = 5;
 static const uint32_t VIDEO_RETRY_MS = 60UL * 1000UL;
@@ -313,7 +326,7 @@ struct Slot {
   uint8_t state;   // 0 free, 1 waiting for upload
   uint8_t tries;
   uint8_t seq;     // shot number, for the file name
-  uint8_t pad;
+  uint8_t flags;   // SLOT_REMOTE: requested from the control page
 };
 struct SlotStore {
   Slot s[SLOTS];
@@ -365,7 +378,7 @@ void cameraAuth(HTTPClient &http) {
   if (cfg.camUser.length()) http.setAuthorization(cfg.camUser.c_str(), cfg.camPass.c_str());
 }
 
-bool captureToCamera(uint8_t seq) {
+bool captureToCamera(uint8_t seq, bool remote) {
   int i = slotStore.next;
   if (slotStore.s[i].state == 1) {
     statDropped++;
@@ -406,7 +419,7 @@ bool captureToCamera(uint8_t seq) {
     return false;
   }
   time_t now = time(nullptr);
-  slotStore.s[i] = {now > 1700000000 ? (uint32_t)now : 0, 1, 0, seq, 0};
+  slotStore.s[i] = {now > 1700000000 ? (uint32_t)now : 0, 1, 0, seq, (uint8_t)(remote ? SLOT_REMOTE : 0)};
   slotStore.next = (i + 1) % SLOTS;
   saveSlots();
   Serial.printf("[capture] slot %d (%s)\n", i, slotFile(i).c_str());
@@ -478,10 +491,11 @@ String jsonStr(const String &j, const char *key) {
 // POSTs to the Apps Script web app and returns its JSON reply ("" on network
 // failure). Apps Script answers with a 302 to script.googleusercontent.com,
 // where the result is read with a GET.
-String scriptCall(const String &action, const String &extraQuery, const String &body) {
+String scriptCall(const String &action, const String &extraQuery, const String &body,
+                  bool quiet = false) {
   String host, basePath;
   if (!splitHttpsUrl(cfg.scriptUrl, host, basePath)) {
-    setError("upload: the Apps Script URL is missing or not https://");
+    if (!quiet) setError("upload: the Apps Script URL is missing or not https://");
     return "";
   }
   String path = basePath + (basePath.indexOf('?') >= 0 ? "&" : "?") + "token=" + urlEncode(cfg.token) +
@@ -490,7 +504,7 @@ String scriptCall(const String &action, const String &extraQuery, const String &
   tls.setCACert(GOOGLE_ROOT_CAS);
   tls.setTimeout(30);  // seconds
   if (!tls.connect(host.c_str(), 443)) {
-    setError("upload: can't reach " + host);
+    if (!quiet) setError("upload: can't reach " + host);
     return "";
   }
   tls.print("POST " + path + " HTTP/1.1\r\nHost: " + host + "\r\nUser-Agent: yicam-bridge/" +
@@ -512,7 +526,7 @@ String scriptCall(const String &action, const String &extraQuery, const String &
       http.end();
     }
   }
-  if (reply.isEmpty()) setError("upload: no answer from the Apps Script (HTTP " + String(code) + ")");
+  if (reply.isEmpty() && !quiet) setError("upload: no answer from the Apps Script (HTTP " + String(code) + ")");
   return reply;
 }
 
@@ -597,7 +611,7 @@ PumpResult pump(WiFiClient &in, WiFiClientSecure &out, size_t len, bool abortOnM
   *copied = 0;
   uint32_t lastData = millis();
   while (*copied < len) {
-    if (abortOnMotion && (motionActive || manualShot)) return PUMP_ABORTED;
+    if (abortOnMotion && (motionActive || manualShot || remoteActive)) return PUMP_ABORTED;
     int n = in.available();
     if (n <= 0) {
       if (!in.connected() || millis() - lastData > 15000) return PUMP_SRC_FAIL;
@@ -692,7 +706,8 @@ bool uploadSlot(int i) {
   localNames(t, day, stamp);
   char seq[4];
   snprintf(seq, sizeof(seq), "%02u", (unsigned)(sl.seq % 100));
-  String name = (sl.t ? stamp : "notime-" + stamp) + "-" + seq + ".jpg";
+  String name = (sl.t ? stamp : "notime-" + stamp) + "-" + seq +
+                ((sl.flags & SLOT_REMOTE) ? "-r" : "") + ".jpg";
   String folder = dayFolder(day);
   if (folder.isEmpty()) return false;
 
@@ -984,6 +999,101 @@ VideoResult uploadVideo(const char *clip) {
 }
 
 // ---------------------------------------------------------------------------
+// Remote control: check in with the Apps Script every pollSec seconds
+// ---------------------------------------------------------------------------
+// Nothing outside the LAN can reach the bridge, so it asks. Each check-in
+// reports a short status (the control page shows it) and returns any capture
+// requests from the page. Requests have ids: the bridge acknowledges them on
+// the next check-in (sent 2 s later) and ignores ids it has already run, so a
+// lost reply can't run a request twice. The script drops requests older than
+// 2 minutes, so an offline bridge never takes surprise photos later.
+uint32_t nextPollMs = 0;
+uint32_t pollBackoffS = 0;
+String pendingAcks;        // "id","id" acknowledged on the next check-in
+String recentCmds[8];
+int recentCmdIdx = 0;
+
+bool seenCmd(const String &id) {
+  for (auto &c : recentCmds)
+    if (c == id) return true;
+  recentCmds[recentCmdIdx] = id;
+  recentCmdIdx = (recentCmdIdx + 1) % 8;
+  return false;
+}
+
+String pollBody() {
+  String err = getText(lastError);
+  String j;
+  j.reserve(400);
+  j += "{\"version\":\"" + String(FW_VERSION) + "\",";
+  j += "\"uptime_s\":" + String(millis() / 1000) + ",";
+  j += "\"poll_s\":" + String(cfg.pollSec) + ",";
+  j += "\"rssi\":" + String(WiFi.RSSI()) + ",";
+  j += "\"motion\":" + String(motionActive ? "true" : "false") + ",";
+  j += "\"remote\":" + String(remoteActive ? "true" : "false") + ",";
+  j += "\"events\":" + String(statEvents) + ",";
+  j += "\"captured\":" + String(statCaptured) + ",";
+  j += "\"uploaded\":" + String(statUploaded) + ",";
+  j += "\"queued\":" + String(statPending) + ",";
+  j += "\"videos_uploaded\":" + String(statVideoUp) + ",";
+  j += "\"videos_queued\":" + String(statVideoQueued) + ",";
+  j += "\"camera_connected\":" + String(mqttClients > 0 ? "true" : "false") + ",";
+  j += "\"last_error\":\"" + jsonEscape(err.substring(0, 160)) + "\",";
+  j += "\"ack\":[" + pendingAcks + "]}";
+  return j;
+}
+
+long jsonNum(const String &j, const char *key) {
+  String k = String("\"") + key + "\":";
+  int i = j.indexOf(k);
+  return i < 0 ? 0 : j.substring(i + k.length()).toInt();
+}
+
+void pollRemote() {
+  String r = scriptCall("poll", "", pollBody(), true);
+  if (r.indexOf("\"ok\":true") < 0) {
+    // Network trouble: back off 1, 2, 4… up to 10 min. A script without the
+    // poll request (older Code.gs) answers with an error: check rarely.
+    pollBackoffS = r.length() ? 600 : (pollBackoffS ? (pollBackoffS * 2 > 600 ? 600 : pollBackoffS * 2) : 60);
+    nextPollMs = millis() + pollBackoffS * 1000UL;
+    return;
+  }
+  pollBackoffS = 0;
+  lastPollOkT = time(nullptr);
+  pendingAcks = "";  // delivered
+
+  bool got = false;
+  int c = r.indexOf("\"commands\"");
+  for (int i = c < 0 ? -1 : r.indexOf("{", c); i >= 0; i = r.indexOf("{", i + 1)) {
+    int end = r.indexOf('}', i);
+    if (end < 0) break;
+    String obj = r.substring(i, end + 1);
+    String id = jsonStr(obj, "id"), type = jsonStr(obj, "type");
+    if (id.isEmpty() || id.length() > 40) continue;
+    got = true;
+    if (pendingAcks.length()) pendingAcks += ",";
+    pendingAcks += "\"" + id + "\"";
+    if (seenCmd(id)) continue;  // already ran it; just acknowledge again
+    long secs = jsonNum(obj, "secs");
+    if (type == "snap") {
+      manualShot = true;
+      remoteShot = true;
+      Serial.println("[remote] snapshot requested");
+    } else if (type == "burst") {
+      if (secs < 5) secs = 5;
+      if (secs > 300) secs = 300;
+      remoteUntilMs = millis() + (uint32_t)secs * 1000UL;
+      remoteActive = true;
+      manualShot = true;  // first shot right away
+      remoteShot = true;
+      Serial.printf("[remote] capturing for %ld s\n", secs);
+    }
+  }
+  // Acknowledge new requests quickly so the page can show "picked up".
+  nextPollMs = millis() + (got ? 2000UL : cfg.pollSec * 1000UL);
+}
+
+// ---------------------------------------------------------------------------
 // Worker task: photos first (capture on time, then upload one at a time),
 // video clips when there's nothing else to do
 // ---------------------------------------------------------------------------
@@ -1004,16 +1114,21 @@ void workerTask(void *) {
       motionActive = false;
     }
 
+    if (remoteActive && (int32_t)(now - remoteUntilMs) >= 0) remoteActive = false;
+
     bool dueMotion = motionActive && shotsThisEvent < cfg.maxShots &&
                      (lastShotMs == 0 || now - lastShotMs >= cfg.intervalSec * 1000UL);
-    if (manualShot || dueMotion) {
-      if (dueMotion) {
-        shotsThisEvent++;
-        lastShotMs = now;
-      }
+    // A "capture for a while" request from the control page uses the same
+    // interval and shares the schedule with motion, so shots never double up.
+    bool dueRemote = remoteActive && now - lastShotMs >= cfg.intervalSec * 1000UL;
+    if (manualShot || dueMotion || dueRemote) {
+      if (dueMotion) shotsThisEvent++;
+      lastShotMs = now;
+      bool remote = remoteShot || (dueRemote && !dueMotion);
       manualShot = false;
+      remoteShot = false;
       captureBusy = true;
-      bool ok = captureToCamera((uint8_t)(seq++ % 100));
+      bool ok = captureToCamera((uint8_t)(seq++ % 100), remote);
       captureBusy = false;
       if (ok) {
         statCaptured++;
@@ -1025,11 +1140,13 @@ void workerTask(void *) {
     statPending = pendingSlots();
 
     // Don't start an upload right before the next shot is due.
-    bool captureSoon = motionActive && shotsThisEvent < cfg.maxShots &&
-                       millis() - lastShotMs + 1500 >= cfg.intervalSec * 1000UL;
+    bool capturing = (motionActive && shotsThisEvent < cfg.maxShots) || remoteActive;
+    bool captureSoon = capturing && millis() - lastShotMs + 1500 >= cfg.intervalSec * 1000UL;
     if (!captureSoon && WiFi.isConnected()) {
       int slot = oldestPendingSlot();
-      if (slot >= 0 && (int32_t)(millis() - nextUploadMs) >= 0) {
+      if (cfg.remoteOn && cfg.scriptUrl.length() && (int32_t)(millis() - nextPollMs) >= 0) {
+        pollRemote();  // short; uploads continue on the next pass
+      } else if (slot >= 0 && (int32_t)(millis() - nextUploadMs) >= 0) {
         digitalWrite(LED_PIN, HIGH);
         if (uploadSlot(slot)) {
           statUploaded++;
@@ -1048,7 +1165,7 @@ void workerTask(void *) {
       } else if (slot < 0 && savedCount && (motionActive || savedCount >= 10 ||
                                              millis() - savedSinceMs >= 3000)) {
         flushSaved(!motionActive);  // report uploads before a long video starts
-      } else if (slot < 0 && !motionActive && videoStore.count &&
+      } else if (slot < 0 && !motionActive && !remoteActive && videoStore.count &&
                  (int32_t)(millis() - nextVideoMs) >= 0) {
         char clip[32];
         xSemaphoreTake(videoMutex, portMAX_DELAY);
@@ -1329,12 +1446,16 @@ void handleStatus() {
   j += "\"videos_skipped\":" + String(statVideoSkipped) + ",";
   j += "\"video_progress\":" + String(videoProgress) + ",";
   j += "\"video_topic\":\"" + jsonEscape(videoTopic()) + "\",";
+  j += "\"remote_on\":" + String(cfg.remoteOn ? "true" : "false") + ",";
+  j += "\"remote_active\":" + String(remoteActive ? "true" : "false") + ",";
+  j += "\"poll_s\":" + String(cfg.pollSec) + ",";
+  j += "\"last_poll_t\":" + String((uint32_t)lastPollOkT) + ",";
   j += "\"video_last_msg\":\"" + jsonEscape(getText(lastVideoMsg)) + "\",";
   j += "\"heap_free\":" + String(ESP.getFreeHeap()) + ",";
   j += "\"heap_max_block\":" + String(ESP.getMaxAllocHeap()) + ",";
   j += "\"auth\":" + String(authEnabled() ? "true" : "false") + ",";
   j += "\"camera_login\":" + String(cfg.camUser.length() ? "true" : "false") + ",";
-  j += "\"busy\":" + String(motionActive || captureBusy || manualShot ? "true" : "false") + ",";
+  j += "\"busy\":" + String(motionActive || remoteActive || captureBusy || manualShot ? "true" : "false") + ",";
   j += "\"wifi_ssid\":\"" + jsonEscape(WiFi.SSID()) + "\",";
   j += "\"wifi_result\":\"" + jsonEscape(wifiResult) + "\",";
   j += "\"last_error\":\"" + jsonEscape(err) + "\"";
@@ -1483,7 +1604,7 @@ void sendJsonError(int code, const char *err) {
 void handlePreview() {
   if (!requireSignIn()) return;
   if (!authEnabled()) return sendJsonError(403, "no_password");
-  if (motionActive || captureBusy || manualShot) return sendJsonError(503, "busy");
+  if (motionActive || remoteActive || captureBusy || manualShot) return sendJsonError(503, "busy");
   if (lastPreviewMs && millis() - lastPreviewMs < 2000) return sendJsonError(429, "too_fast");
   lastPreviewMs = millis();
 
@@ -1560,6 +1681,8 @@ void handleSettingsGet() {
   j += "\"has_otaPass\":" + String(has(cfg.otaPass)) + ",";
   j += "\"videoOn\":\"" + String(cfg.videoOn ? "on" : "off") + "\",";
   j += "\"videoCap\":" + String(cfg.videoCap) + ",";
+  j += "\"remoteOn\":\"" + String(cfg.remoteOn ? "on" : "off") + "\",";
+  j += "\"pollSec\":" + String(cfg.pollSec) + ",";
   j += "\"wifi_ssid\":\"" + jsonEscape(WiFi.SSID()) + "\",";
   j += "\"wifi_rssi\":" + String(WiFi.RSSI()) + ",";
   j += "\"ip\":\"" + WiFi.localIP().toString() + "\",";
@@ -1619,6 +1742,14 @@ void handleSettingsSave() {
     if (cap < 1 || cap > 500) return fieldError("videoCap", "Use 1 to 500 clips per day.");
     n.videoOn = von == "on";
     n.videoCap = cap;
+  }
+  String ron = val("remoteOn");
+  if (ron.length()) {  // older settings pages don't send it
+    if (ron != "on" && ron != "off") return fieldError("remoteOn", "Choose on or off.");
+    long ps = val("pollSec").toInt();
+    if (ps < 15 || ps > 300) return fieldError("pollSec", "Use 15 to 300 seconds.");
+    n.remoteOn = ron == "on";
+    n.pollSec = ps;
   }
 
   n.tz = val("tz");

@@ -60,6 +60,7 @@ function doPost(e) {
       case 'token': return json_(handleToken_());
       case 'folder': return json_(handleFolder_(e.parameter.day));
       case 'saved': return json_(handleSaved_(e.postData && e.postData.contents));
+      case 'poll': return json_(handlePoll_(e.postData && e.postData.contents));
     }
     // No action: legacy upload of one base64 JPEG in the body.
     if (!e.postData || !e.postData.contents) {
@@ -121,9 +122,11 @@ function handleSaved_(body) {
   }
   if (!Array.isArray(files)) return { ok: false, error: 'bad json' };
   let n = 0;
+  let remotePhotos = 0;
   for (const f of files.slice(0, 50)) {
     if (!f || typeof f.id !== 'string' || typeof f.folder !== 'string') continue;
     const name = sanitizeName_(f.name) || f.id;
+    if (f.kind !== 'video' && /-r\.jpe?g$/i.test(name)) remotePhotos++;
     try {
       if (f.kind === 'video') noteVideo_(f.id, name);
       else queueNotification_(f.id, name, f.folder);
@@ -132,12 +135,244 @@ function handleSaved_(body) {
       console.error('notification not queued: ' + err);
     }
   }
+  if (remotePhotos) creditRemotePhotos_(remotePhotos);
   return { ok: true, noted: n };
 }
 
-/** Simple health check: open the /exec URL in a browser. */
+/**
+ * Opened by you (deployment "Only myself", signed in): the control page.
+ * Anyone else, e.g. the bridge's own deployment opened anonymously: a health check.
+ */
 function doGet() {
+  if (isOwner_()) {
+    return HtmlService.createHtmlOutputFromFile('Control')
+      .setTitle('YiCam')
+      .addMetaTag('viewport', 'width=device-width, initial-scale=1, viewport-fit=cover');
+  }
   return json_({ ok: true, service: 'yicam-bridge receiver' });
+}
+
+// --- Remote control: check-ins from the bridge, requests from the page --------
+// The bridge can't be reached from outside, so it checks in every ~30 s
+// (action=poll on the bridge's deployment, with TOKEN). It reports a short
+// status, kept in the script cache, and receives queued capture requests.
+// Requests have ids; the bridge acknowledges them on its next check-in.
+// Unacknowledged requests expire after 2 minutes.
+
+const CMD_TTL_MS = 2 * 60 * 1000;    // a request not picked up by then is dropped
+const CMD_KEEP_MS = 30 * 60 * 1000;  // finished requests stay visible this long
+const CMD_MAX_QUEUED = 5;
+
+function handlePoll_(body) {
+  let st;
+  try {
+    st = JSON.parse(body || '{}');
+  } catch (err) {
+    return { ok: false, error: 'bad json' };
+  }
+  const now = Date.now();
+  const ack = Array.isArray(st.ack) ? st.ack.map(String) : [];
+  delete st.ack;
+  CacheService.getScriptCache().put('BRIDGE', JSON.stringify({ status: st, seen: now }), 21600);
+  return withLock_(() => {
+    const props = PropertiesService.getScriptProperties();
+    let cmds = JSON.parse(props.getProperty('COMMANDS') || '[]');
+    let changed = false;
+    for (const c of cmds) {
+      if (c.state === 'queued' && ack.indexOf(c.id) >= 0) {
+        c.state = 'taken';
+        c.taken = now;
+        changed = true;
+      } else if (c.state === 'queued' && now - c.created > CMD_TTL_MS) {
+        c.state = 'expired';
+        changed = true;
+      }
+    }
+    const n = cmds.length;
+    cmds = cmds.filter(c => now - c.created < CMD_KEEP_MS);
+    if (changed || cmds.length !== n) props.setProperty('COMMANDS', JSON.stringify(cmds));
+    return {
+      ok: true,
+      commands: cmds.filter(c => c.state === 'queued').map(c => ({ id: c.id, type: c.type, secs: c.secs || 0 })),
+    };
+  });
+}
+
+/** Remote photos (named …-r.jpg) count toward the latest picked-up request. */
+function creditRemotePhotos_(n) {
+  withLock_(() => {
+    const props = PropertiesService.getScriptProperties();
+    const cmds = JSON.parse(props.getProperty('COMMANDS') || '[]');
+    const c = cmds.filter(x => x.state === 'taken').pop();
+    if (!c) return;
+    c.photos = (c.photos || 0) + n;
+    props.setProperty('COMMANDS', JSON.stringify(cmds));
+  });
+}
+
+// --- Control page (deployment "Only myself") -------------------------------
+// Every function below checks that the signed-in user is the script's owner,
+// so they can't be used from the bridge's public deployment.
+
+function isOwner_() {
+  try {
+    const me = Session.getEffectiveUser().getEmail();
+    const who = Session.getActiveUser().getEmail();
+    return !!me && who === me;
+  } catch (err) {
+    return false;
+  }
+}
+
+function requireOwner_() {
+  if (!isOwner_()) throw new Error('Not allowed. Open this page signed in as the script owner.');
+}
+
+function ui_state() {
+  requireOwner_();
+  const bridge = JSON.parse(CacheService.getScriptCache().get('BRIDGE') || 'null');
+  const cmds = JSON.parse(PropertiesService.getScriptProperties().getProperty('COMMANDS') || '[]');
+  return { now: Date.now(), bridge: bridge, commands: cmds.slice(-4).reverse(), cmdTtlMs: CMD_TTL_MS };
+}
+
+function ui_capture(kind) {
+  requireOwner_();
+  const kinds = { snap: { type: 'snap', secs: 0 }, b30: { type: 'burst', secs: 30 }, b60: { type: 'burst', secs: 60 } };
+  const k = kinds[kind];
+  if (!k) throw new Error('Unknown request');
+  withLock_(() => {
+    const props = PropertiesService.getScriptProperties();
+    const now = Date.now();
+    let cmds = JSON.parse(props.getProperty('COMMANDS') || '[]').filter(c => now - c.created < CMD_KEEP_MS);
+    if (cmds.filter(c => c.state === 'queued').length >= CMD_MAX_QUEUED) {
+      throw new Error('Too many requests waiting for the bridge.');
+    }
+    const id = now.toString(36) + Math.floor(Math.random() * 1e6).toString(36);
+    cmds.push({ id: id, type: k.type, secs: k.secs, created: now, state: 'queued', photos: 0 });
+    props.setProperty('COMMANDS', JSON.stringify(cmds.slice(-20)));
+  });
+  return ui_state();
+}
+
+/** Day folders, newest first: [{day, id}]. */
+function ui_days() {
+  requireOwner_();
+  const rootId = rootFolderId_();
+  const days = [];
+  let pageToken;
+  do {
+    const res = Drive.Files.list({
+      q: `'${rootId}' in parents and mimeType = '${FOLDER_MIME}' and trashed = false`,
+      fields: 'nextPageToken, files(id, name)',
+      pageSize: 100,
+      pageToken: pageToken,
+    });
+    (res.files || []).forEach(f => { if (DAY_RE.test(f.name)) days.push({ day: f.name, id: f.id }); });
+    pageToken = res.nextPageToken;
+  } while (pageToken);
+  days.sort((a, b) => (a.day < b.day ? 1 : -1));
+  return days;
+}
+
+/**
+ * One day's photos and clips grouped into events (files less than 2 minutes
+ * apart), newest first. Times come from the file names the bridge gives:
+ * yyyyMMdd-HHmmss[-NN][-r].jpg and yyyyMMdd-HHmmss.mp4.
+ */
+function ui_timeline(dayId) {
+  requireOwner_();
+  const rootId = rootFolderId_();
+  const folder = Drive.Files.get(String(dayId), { fields: 'id, name, mimeType, parents' });
+  if (folder.mimeType !== FOLDER_MIME || !DAY_RE.test(folder.name) || (folder.parents || []).indexOf(rootId) < 0) {
+    throw new Error('Not a YiCam day folder');
+  }
+  const items = [];
+  const thumbs = {};
+  let pageToken;
+  do {
+    const res = Drive.Files.list({
+      q: `'${folder.id}' in parents and trashed = false`,
+      fields: 'nextPageToken, files(id, name, mimeType, webViewLink, thumbnailLink, createdTime)',
+      pageSize: 500,
+      pageToken: pageToken,
+    });
+    (res.files || []).forEach(f => {
+      const isVideo = /^video\//.test(f.mimeType);
+      if (!isVideo && !/^image\//.test(f.mimeType)) return;
+      const m = /^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})/.exec(f.name);
+      const t = m ? Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6])  // local time, as UTC fields
+                  : new Date(f.createdTime).getTime();
+      items.push({ id: f.id, name: f.name, url: f.webViewLink, video: isVideo, t: t, named: !!m,
+                   remote: /-r\.jpe?g$/i.test(f.name) });
+      if (f.thumbnailLink) thumbs['th_' + f.id] = f.thumbnailLink;
+    });
+    pageToken = res.nextPageToken;
+  } while (pageToken);
+  if (Object.keys(thumbs).length) CacheService.getScriptCache().putAll(thumbs, 21600);
+
+  items.sort((a, b) => a.t - b.t);
+  const events = [];
+  let ev = null;
+  for (const it of items) {
+    if (!ev || it.t - ev.end > 2 * 60 * 1000) {
+      ev = { start: it.t, end: it.t, photos: [], videos: [] };
+      events.push(ev);
+    }
+    ev.end = Math.max(ev.end, it.t);
+    (it.video ? ev.videos : ev.photos).push({ id: it.id, name: it.name, url: it.url, remote: it.remote, t: it.t });
+  }
+  const hhmm = t => new Date(t).toISOString().substr(11, 5);  // t holds local time in UTC fields
+  return {
+    day: folder.name,
+    folderUrl: 'https://drive.google.com/drive/folders/' + folder.id,
+    events: events.reverse().map(e => ({
+      start: hhmm(e.start), end: hhmm(e.end),
+      remote: e.photos.length > 0 && e.photos.every(p => p.remote),
+      photos: e.photos, videos: e.videos.map(v => ({ id: v.id, url: v.url, time: hhmm(v.t) })),
+    })),
+  };
+}
+
+/** Small thumbnails as data URLs, for up to 12 of the script's own files. */
+function ui_thumbs(ids) {
+  requireOwner_();
+  ids = (Array.isArray(ids) ? ids : []).map(String).filter(id => /^[A-Za-z0-9_-]{10,100}$/.test(id)).slice(0, 12);
+  const cache = CacheService.getScriptCache();
+  const out = {};
+  const have = cache.getAll(ids.map(id => 'td_' + id));
+  const links = cache.getAll(ids.map(id => 'th_' + id));
+  const todo = [];
+  for (const id of ids) {
+    if (have['td_' + id]) { out[id] = have['td_' + id]; continue; }
+    let link = links['th_' + id];
+    if (!link) {
+      try {  // drive.file: only the script's own files are reachable
+        link = Drive.Files.get(id, { fields: 'thumbnailLink' }).thumbnailLink;
+      } catch (err) {
+        link = '';
+      }
+    }
+    // Only ever fetch Google's own thumbnail hosts with the token.
+    if (link && /^https:\/\/[a-z0-9.-]+\.(googleusercontent|google)\.com\//.test(link)) {
+      todo.push({ id: id, url: link.replace(/=s\d+$/, '=s320') });
+    }
+  }
+  if (todo.length) {
+    const token = ScriptApp.getOAuthToken();
+    const res = UrlFetchApp.fetchAll(todo.map(t => ({
+      url: t.url, headers: { Authorization: 'Bearer ' + token }, muteHttpExceptions: true, followRedirects: true,
+    })));
+    const put = {};
+    res.forEach((r, i) => {
+      if (r.getResponseCode() !== 200) return;
+      const b = r.getBlob();
+      const data = 'data:' + (b.getContentType() || 'image/jpeg') + ';base64,' + Utilities.base64Encode(b.getBytes());
+      out[todo[i].id] = data;
+      if (data.length < 90000) put['td_' + todo[i].id] = data;
+    });
+    if (Object.keys(put).length) cache.putAll(put, 21600);
+  }
+  return out;
 }
 
 /**

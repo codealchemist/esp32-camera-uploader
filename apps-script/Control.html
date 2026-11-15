@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="en">
+<head>
+<base target="_blank">
+<meta charset="utf-8">
+<meta name="color-scheme" content="dark">
+<style>
+:root{--bg:#0e1014;--card:#161a21;--line:#252b36;--tx:#e7e9ee;--mu:#8a93a6;--ac:#5b9dff;--ok:#3ecf8e;--wa:#f5a524;--bad:#f0506e;--r:14px}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--tx);
+font:15px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;-webkit-font-smoothing:antialiased}
+main{max-width:720px;margin:0 auto;padding:16px 16px 40px;overflow-x:hidden}
+.card{min-width:0}
+header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:14px}
+h1{font-size:20px;margin:0}
+h2{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--mu);margin:0 0 12px;font-weight:600}
+a{color:var(--ac);text-decoration:none}
+.pill{display:inline-flex;align-items:center;gap:7px;padding:5px 11px;border-radius:99px;background:var(--card);
+border:1px solid var(--line);font-size:13px;color:var(--mu);white-space:nowrap}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--mu)}
+.on .dot{background:var(--ok);box-shadow:0 0 0 3px #3ecf8e33}.off .dot{background:var(--bad)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:16px;margin-bottom:14px}
+.state{display:flex;align-items:center;gap:12px;margin-bottom:14px}
+.big{width:40px;height:40px;border-radius:50%;display:grid;place-items:center;background:#ffffff0d;flex:none}
+.big i{width:12px;height:12px;border-radius:50%;background:var(--mu)}
+.active .big{background:#f5a52422}.active .big i{background:var(--wa);animation:p 1.2s infinite}
+@keyframes p{0%{box-shadow:0 0 0 0 #f5a52499}100%{box-shadow:0 0 0 12px #f5a52400}}
+.state b{display:block;font-size:17px}.state span{color:var(--mu);font-size:13px}
+.btns{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+button{font:inherit;font-weight:600;font-size:14px;border-radius:10px;padding:11px 6px;cursor:pointer;line-height:1.2;
+border:1px solid var(--line);background:#ffffff08;color:var(--tx)}
+button:disabled{opacity:.5}
+.pri{background:var(--ac);border-color:var(--ac);color:#06101f}
+.cmds{margin-top:12px;display:grid;gap:6px}
+.cmd{display:flex;flex-wrap:wrap;justify-content:space-between;gap:2px 10px;font-size:13px;color:var(--mu);padding:8px 10px;
+background:#ffffff06;border-radius:9px}
+.cmd b{color:var(--tx);font-weight:600}.cmd .ok{color:var(--ok)}.cmd .bad{color:var(--bad)}
+.err{display:none;margin-top:12px;padding:9px 11px;border-radius:9px;background:#f0506e14;border:1px solid #f0506e44;
+color:#ffb3c1;font-size:13px;overflow-wrap:anywhere}
+.days{display:flex;gap:6px;overflow-x:auto;padding-bottom:4px;margin-bottom:12px;scrollbar-width:none}
+.days button{padding:6px 12px;font-size:13px;border-radius:99px;white-space:nowrap;flex:none;color:var(--mu)}
+.days button.sel{background:var(--ac);border-color:var(--ac);color:#06101f}
+.ev{border-top:1px solid var(--line);padding:12px 0}.ev:first-child{border-top:0;padding-top:0}
+.evh{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:baseline;gap:2px 8px;margin-bottom:8px}
+.evh b{font-size:15px}.evh span{color:var(--mu);font-size:12px}
+.tag{font-size:11px;font-weight:600;padding:2px 7px;border-radius:99px;background:#ffffff10;color:var(--mu);margin-left:6px}
+.tag.r{background:#5b9dff22;color:#9cc2ff}
+.thumbs{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}
+.thumbs a{display:block;aspect-ratio:16/9;border-radius:8px;overflow:hidden;background:#0b0d11 center/cover no-repeat;
+position:relative}
+.thumbs a.more{display:grid;place-items:center;color:var(--mu);font-size:13px;font-weight:600}
+.clips{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.clips a{font-size:13px;padding:5px 10px;border-radius:99px;border:1px solid var(--line);color:var(--tx)}
+.empty{color:var(--mu);font-size:14px;padding:8px 0}
+.foot{color:var(--mu);font-size:12px;text-align:center;margin-top:8px}
+</style>
+</head>
+<body><main>
+<header><h1>YiCam</h1><span class="pill" id="pill"><span class="dot"></span><span id="pillT">connecting…</span></span></header>
+
+<section class="card">
+ <div class="state" id="state"><div class="big"><i></i></div><div><b id="stT">–</b><span id="stS"></span></div></div>
+ <div class="btns">
+  <button class="pri" data-k="snap">Take<br>snapshot</button>
+  <button data-k="b30">Capture<br>30 s</button>
+  <button data-k="b60">Capture<br>1 min</button>
+ </div>
+ <div class="cmds" id="cmds"></div>
+ <div class="err" id="err"></div>
+</section>
+
+<section class="card">
+ <h2>Timeline</h2>
+ <div class="days" id="days"></div>
+ <div id="tl"><div class="empty">Loading…</div></div>
+</section>
+<div class="foot" id="foot"></div>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const run = (fn, ...args) => new Promise((ok, bad) =>
+  google.script.run.withSuccessHandler(ok).withFailureHandler(bad)[fn](...args));
+let ST = null, DAYS = [], DAY = null, TL = null, thumbsAsked = new Set(), lastPhotos = -1;
+
+function ago(ms) {
+  const s = Math.max(0, Math.round(ms / 1000));
+  return s < 60 ? s + ' s ago' : s < 3600 ? Math.round(s / 60) + ' min ago' : Math.round(s / 3600) + ' h ago';
+}
+function err(m) { const e = $('err'); e.textContent = m || ''; e.style.display = m ? 'block' : 'none'; }
+
+function renderState(s) {
+  ST = s;
+  const b = s.bridge, st = b && b.status || {};
+  const pollMs = (st.poll_s || 30) * 1000;
+  const online = b && s.now - b.seen < Math.max(90000, 3 * pollMs);
+  $('pill').className = 'pill ' + (online ? 'on' : 'off');
+  $('pillT').textContent = !b ? 'bridge not seen yet' : (online ? 'online' : 'offline') + ' · ' + ago(s.now - b.seen);
+  const active = online && (st.motion || st.remote);
+  $('state').classList.toggle('active', !!active);
+  $('stT').textContent = !online ? 'Bridge offline' : st.motion ? 'Motion detected' : st.remote ? 'Capturing (your request)' : 'Watching';
+  $('stS').textContent = !b ? 'Waiting for the first check-in' :
+    'Checks in every ' + Math.round(pollMs / 1000) + ' s · ' + (st.camera_connected ? 'camera connected' : 'camera not connected') +
+    (st.queued ? ' · ' + st.queued + ' photo(s) waiting to upload' : '');
+  err(online && st.last_error ? 'Last bridge error: ' + st.last_error : '');
+
+  const box = $('cmds'); box.textContent = '';
+  let photos = 0;
+  for (const c of s.commands) {
+    photos += c.photos || 0;
+    const what = c.type === 'snap' ? 'Snapshot' : 'Capture ' + (c.secs >= 60 ? c.secs / 60 + ' min' : c.secs + ' s');
+    let txt, cls = '';
+    if (c.state === 'queued') {
+      const left = Math.max(0, Math.round((pollMs - (s.now - (b ? b.seen : s.now))) / 1000));
+      txt = 'waiting for the bridge' + (online ? ' (next check-in in ~' + Math.max(left, 1) + ' s)' : ' (offline)');
+    } else if (c.state === 'expired') { txt = 'expired: the bridge didn’t check in'; cls = 'bad'; }
+    else if (c.photos) {
+      const running = c.type === 'burst' && s.now - c.taken < c.secs * 1000 + 15000;
+      txt = c.photos + ' photo' + (c.photos > 1 ? 's' : '') + ' uploaded' + (running ? ', capturing…' : ''); cls = running ? '' : 'ok';
+    } else txt = 'picked up, capturing…';
+    const row = document.createElement('div'); row.className = 'cmd';
+    const l = document.createElement('span'); const bl = document.createElement('b'); bl.textContent = what;
+    l.append(bl, ' · ' + new Date(c.created).toTimeString().substr(0, 5));
+    const r = document.createElement('span'); r.className = cls; r.textContent = txt;
+    row.append(l, r); box.appendChild(row);
+  }
+  // New photos from a request: refresh today's timeline.
+  if (lastPhotos >= 0 && photos > lastPhotos && DAY && DAYS[0] && DAY.id === DAYS[0].id) loadTimeline(DAY, true);
+  lastPhotos = photos;
+}
+
+async function poll() {
+  try { renderState(await run('ui_state')); }
+  catch (e) { err(String(e.message || e)); }
+}
+
+document.querySelectorAll('.btns button').forEach(btn => btn.onclick = async () => {
+  document.querySelectorAll('.btns button').forEach(b => b.disabled = true);
+  try { renderState(await run('ui_capture', btn.dataset.k)); }
+  catch (e) { err(String(e.message || e)); }
+  setTimeout(() => document.querySelectorAll('.btns button').forEach(b => b.disabled = false), 1500);
+});
+
+function localDay(dt) {
+  const p = n => String(n).padStart(2, '0');
+  return dt.getFullYear() + '-' + p(dt.getMonth() + 1) + '-' + p(dt.getDate());
+}
+function dayLabel(d, i) {
+  const today = new Date();
+  if (d === localDay(today)) return 'Today';
+  if (d === localDay(new Date(today.getTime() - 86400000))) return 'Yesterday';
+  const dt = new Date(d + 'T12:00:00');
+  return dt.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' });
+}
+
+function renderDays() {
+  const box = $('days'); box.textContent = '';
+  DAYS.forEach((d, i) => {
+    const b = document.createElement('button'); b.textContent = dayLabel(d.day, i);
+    b.className = DAY && DAY.id === d.id ? 'sel' : '';
+    b.onclick = () => loadTimeline(d);
+    box.appendChild(b);
+  });
+}
+
+async function loadTimeline(d, quiet) {
+  DAY = d; renderDays();
+  if (!quiet) $('tl').innerHTML = '<div class="empty">Loading…</div>';
+  try { TL = await run('ui_timeline', d.id); renderTimeline(); }
+  catch (e) { $('tl').innerHTML = ''; const m = document.createElement('div'); m.className = 'empty';
+    m.textContent = 'Could not load: ' + (e.message || e); $('tl').appendChild(m); }
+}
+
+function renderTimeline() {
+  const box = $('tl'); box.textContent = '';
+  if (!TL.events.length) { box.innerHTML = '<div class="empty">Nothing saved this day.</div>'; return; }
+  const want = [];
+  for (const ev of TL.events) {
+    const e = document.createElement('div'); e.className = 'ev';
+    const h = document.createElement('div'); h.className = 'evh';
+    const t = document.createElement('b'); t.textContent = ev.start === ev.end ? ev.start : ev.start + '–' + ev.end;
+    const tag = document.createElement('span'); tag.className = 'tag' + (ev.remote ? ' r' : '');
+    tag.textContent = ev.remote ? 'requested' : 'motion'; t.appendChild(tag);
+    const c = document.createElement('span');
+    c.textContent = [ev.photos.length && ev.photos.length + ' photo' + (ev.photos.length > 1 ? 's' : ''),
+                     ev.videos.length && ev.videos.length + ' clip' + (ev.videos.length > 1 ? 's' : '')].filter(Boolean).join(' · ');
+    h.append(t, c); e.appendChild(h);
+    if (ev.photos.length) {
+      const g = document.createElement('div'); g.className = 'thumbs';
+      const shown = ev.photos.length > 8 ? ev.photos.slice(0, 7) : ev.photos;
+      for (const p of shown) {
+        const a = document.createElement('a'); a.href = p.url; a.title = p.name; a.dataset.id = p.id;
+        if (THUMBS[p.id]) a.style.backgroundImage = 'url("' + THUMBS[p.id] + '")'; else want.push(p.id);
+        g.appendChild(a);
+      }
+      if (shown.length < ev.photos.length) {
+        const a = document.createElement('a'); a.className = 'more'; a.href = TL.folderUrl;
+        a.textContent = '+' + (ev.photos.length - shown.length); g.appendChild(a);
+      }
+      e.appendChild(g);
+    }
+    if (ev.videos.length) {
+      const cl = document.createElement('div'); cl.className = 'clips';
+      for (const v of ev.videos) { const a = document.createElement('a'); a.href = v.url; a.textContent = '▶ ' + v.time; cl.appendChild(a); }
+      e.appendChild(cl);
+    }
+    box.appendChild(e);
+  }
+  $('foot').innerHTML = ''; const a = document.createElement('a'); a.href = TL.folderUrl; a.textContent = 'Open this day in Drive';
+  $('foot').appendChild(a);
+  loadThumbs(want.filter(id => !thumbsAsked.has(id)));
+}
+
+const THUMBS = {};
+async function loadThumbs(ids) {
+  for (let i = 0; i < ids.length; i += 12) {
+    const batch = ids.slice(i, i + 12); batch.forEach(id => thumbsAsked.add(id));
+    try {
+      const got = await run('ui_thumbs', batch);
+      for (const id in got) {
+        THUMBS[id] = got[id];
+        document.querySelectorAll('.thumbs a[data-id="' + id + '"]').forEach(a => a.style.backgroundImage = 'url("' + got[id] + '")');
+      }
+      batch.filter(id => !got[id]).forEach(id => thumbsAsked.delete(id));  // not ready yet: retry next refresh
+    } catch (e) { batch.forEach(id => thumbsAsked.delete(id)); }
+  }
+}
+
+async function start() {
+  poll();
+  try {
+    DAYS = await run('ui_days');
+    if (DAYS.length) loadTimeline(DAYS[0]); else $('tl').innerHTML = '<div class="empty">Nothing saved yet.</div>';
+  } catch (e) { $('tl').innerHTML = ''; err(String(e.message || e)); }
+}
+setInterval(() => { if (!document.hidden) poll(); }, 5000);
+setInterval(() => { if (!document.hidden && DAY && DAYS[0] && DAY.id === DAYS[0].id) loadTimeline(DAY, true); }, 60000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) poll(); });
+start();
+</script>
+</body>
+</html>

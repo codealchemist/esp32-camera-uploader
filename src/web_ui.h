@@ -155,6 +155,7 @@ and the camera preview stays off until you set one. <a href="/settings" style="c
  <dt>Shots per event</dt><dd id="cShots">–</dd>
  <dt>Resolution</dt><dd id="cRes">–</dd>
  <dt>Drive upload</dt><dd id="cDrv">–</dd>
+ <dt>Remote control</dt><dd id="cRem">–</dd>
 </dl></section>
 </div>
 
@@ -186,8 +187,9 @@ function render(s){
   else if(k==='reverted')toast('Couldn’t join “'+n+'”, back on “'+s.wifi_ssid+'”','bad')}
  set('cLog',s.camera_login?'Stored on bridge':'Not set');
  const m=s.motion_active;$('state').classList.toggle('motion',m);
- set('stateT',m?'Motion detected':'Watching');
- set('stateS',m?'Taking a shot every '+s.interval_s+' s (max '+s.max_shots+')'
+ $('state').classList.toggle('motion',m||s.remote_active);
+ set('stateT',m?'Motion detected':s.remote_active?'Capturing (remote request)':'Watching');
+ set('stateS',s.remote_active&&!m?'Taking a shot every '+s.interval_s+' s':m?'Taking a shot every '+s.interval_s+' s (max '+s.max_shots+')'
   :s.mqtt_clients>0?'Camera connected, waiting for motion':'Waiting for the camera to connect');
  set('sEv',s.events);set('sCap',s.captured);set('sUp',s.uploaded);set('sQ',s.queued);
  $('fCap').lastElementChild.textContent=s.capture_failed;bad('fCap',s.capture_failed);
@@ -226,6 +228,8 @@ function render(s){
  set('cRes',s.res);
  set('cDrv',s.script_configured?'Configured':'Not configured');
  $('cDrv').style.color=s.script_configured?'var(--ok)':'var(--bad)';
+ set('cRem',!s.remote_on?'Off':s.last_poll_t?'Checked in '+ago(s.last_poll_t):'Not checked in yet');
+ $('cRem').style.color=!s.remote_on?'':s.last_poll_t&&Date.now()/1e3-s.last_poll_t<3*s.poll_s?'var(--ok)':'var(--wa)';
 }
 
 function online(ok,txt){const c=$('conn');c.className='pill '+(ok?'live':'down');set('connT',txt)}
@@ -468,6 +472,8 @@ const SPEC=[
   ['interval','Seconds between shots','number'],['maxShots','Max shots per motion event','number']]],
  ['Video clips',[['videoOn','Upload motion video clips','select:on|off','The camera records a clip of each motion event; the bridge uploads it to the same Drive day folder after the photos.'],
   ['videoCap','Max clips per day','number','About 5 MB each. Clips over the limit stay on the camera only.']]],
+ ['Remote control',[['remoteOn','Check in with the Apps Script','select:on|off','Lets the Apps Script control page request captures. The bridge only makes outgoing requests; nothing is opened to the internet.'],
+  ['pollSec','Seconds between check-ins','number','15 to 300. A request from the control page starts within this time.']]],
  ['Device',[['tz','Timezone (POSIX)','text','For example <-03>3 for UTC-3.'],['otaPass','OTA update password','secret']]],
  ['Dashboard password',[['newDash','New password','new','At least 12 characters. Leave blank to keep the current one. Changing it signs every device out.'],
   ['newDash2','Repeat new password','new']]]];

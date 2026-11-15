@@ -18,6 +18,7 @@ ESP32 ──"saved" report──▶ Apps Script (email notifications, day folder
 - Plain HTTP and MQTT never leave your LAN. The only traffic to the internet is HTTPS to Google, and the ESP32 verifies Google's certificate.
 - Target board: ESP32 DevKit with the ESP-WROOM-32 module and CP2102 USB chip (no PSRAM). Files never live on the ESP32: they're streamed from the camera to Drive in small pieces.
 - During a motion event the ESP32 takes a shot every `interval` seconds, up to `maxShots`, until `motion_stop`. The AI labels `human`, `vehicle` and `animal`, which the camera sends on the same topic, also count as motion.
+- Optional control page, a second deployment of the same script behind your Google sign-in: request captures from your phone and browse a timeline of events with their photos and clips. The bridge checks in every 30 s, so nothing at home is opened to the internet.
 - The Drive token comes from your Apps Script and only reaches the script's own `YiCam` folder (`drive.file`). The bridge keeps it in RAM only and gets a new one every hour.
 
 ## 1. Google Drive receiver (Apps Script)

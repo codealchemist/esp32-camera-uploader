@@ -77,6 +77,36 @@ With `NOTIFY_EMAIL` set, you get **one email per motion event** with its photos 
 
 To test it, run `testNotification` in the editor. You should get a "[Test] YiCam" email with the most recent photo. To stop the emails, delete `NOTIFY_EMAIL`.
 
+### Control page for your phone (optional)
+
+A second deployment of the same script gives you a page, signed in with your Google account, where you can **request captures** and browse a **timeline** of everything saved: photos grouped by event, with the event's video clips. Tapping an item opens it in Drive's viewer.
+
+How it works:
+- The bridge can't be reached from outside, so it **checks in** with the script every 30 s (adjustable in the bridge's Settings), using its usual token.
+- A capture you request starts at the next check-in, so within about 30 s, and runs at the bridge's *Seconds between shots*.
+- Requests expire after 2 minutes, so an offline bridge never takes surprise photos later.
+- Requested photos are named `…-r.jpg` and marked *requested* on the timeline.
+- Nothing in your home network is opened to the internet.
+
+Setup:
+1. In the Apps Script editor, add an HTML file: **Files → + → HTML**, named **`Control`**. Paste [`apps-script/Control.html`](apps-script/Control.html) into it.
+2. Paste the current `Code.gs` and `appsscript.json`, and save. The manifest adds one permission, **your email address**: the page uses it to check that the person signed in is you.
+3. Run `setup` once in the editor to approve the new permission.
+4. **Update the bridge's deployment:** **Deploy → Manage deployments →** edit the existing web app → **Version: New version**, keep *Who has access* = **Anyone** → **Deploy**. Same URL as before.
+5. **Create the control deployment:** **Deploy → New deployment → Web app**, *Execute as* **Me**, *Who has access* **Only myself** → **Deploy**. Its `/exec` URL is your control page.
+6. Open that URL on your phone, signed in to the same Google account, and add it to the home screen:
+   - iPhone: Safari → Share → **Add to Home Screen**
+   - Android: Chrome → ⋮ → **Add to home screen**
+
+Notes:
+- **Check both deployments in a private browser window:**
+  - the bridge's URL should show `{"ok":true,"service":"yicam-bridge receiver"}`
+  - the control URL should ask you to sign in to Google
+
+  Every page function also refuses anyone who isn't the script's owner, so a wrong access setting can't expose the page.
+- If the page says "unable to open the file", your phone's browser is probably signed in to several Google accounts. Make the owner account the only one, or the first one, in that browser.
+- After each `Code.gs` update, publish a new version of **both** deployments, choosing the same access as before for each.
+
 ## 3. Bridge setup portal
 
 1. Power the ESP32. On your phone or laptop, join **`YiCam-Setup`** with the password from step 1.
@@ -160,7 +190,7 @@ PLATFORMIO_UPLOAD_FLAGS="--auth=<ota-password>" pio run -e ota -t upload
 
 **Firmware over USB:** `pio run -e usb -t upload`. Settings, sessions and pending uploads are kept.
 
-**Apps Script:** paste the new `Code.gs` (and `appsscript.json` if it changed), then **Deploy → Manage deployments → New version**. Bridge firmware 0.5 and later needs a script with the `token`, `folder` and `saved` requests. With an older script, the dashboard shows "the Apps Script is out of date".
+**Apps Script:** paste the new `Code.gs` (plus `appsscript.json` and `Control.html` if they changed), then **Deploy → Manage deployments → New version** for each deployment. Bridge firmware 0.5 and later needs a script with the `token`, `folder` and `saved` requests. With an older script, the dashboard shows "the Apps Script is out of date".
 
 ## Troubleshooting
 
@@ -177,6 +207,7 @@ Start with **Last error** on the dashboard (`last_error` in the raw JSON). For t
 | **Motion events** stays at 0 | The camera isn't reaching the broker. Check the MQTT settings (step 6). The serial log shows `[mqtt] client connected` or `rejected`. |
 | **Dropped** goes up | All 30 photo slots are waiting, usually because Drive was unreachable for a while. Uploads catch up once it's back. |
 | No **Video clips** after motion | Check `video_last_msg` in the raw JSON. If it's empty, the camera didn't announce a clip: check its video-list topic (step 6) and that it records on motion. |
+| Control page shows the bridge **offline** | Check **Remote control** in the bridge's Settings and the dashboard's "Remote control" line. With a script older than the control page, the bridge checks in only every 10 minutes: update `Code.gs` and deploy a new version. |
 | The bridge never joins Wi-Fi | It only supports 2.4 GHz. Use the setup portal (BOOT + EN) to fix the network and password. |
 
 ## Camera notes
