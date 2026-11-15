@@ -2,6 +2,10 @@
 
 This firmware turns a cheap ESP32 DevKit into a small motion bridge for a Yi camera running [yi-hack-Allwinner](https://github.com/roleoroleo/yi-hack-Allwinner). It saves motion photos and the camera's video clips to Google Drive:
 
+<p align="center">
+  <img src="docs/dashboard.png" width="720" alt="yicam-bridge dashboard during a motion event: live status, photo and video upload counters, device and setup details">
+</p>
+
 ```
 Yi camera ──MQTT motion_start/stop──▶ ESP32 (MQTT broker)
 ESP32 ──snapshot.sh?file=…──▶ Yi camera saves the JPEG on its own SD card
