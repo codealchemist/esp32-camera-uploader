@@ -29,7 +29,7 @@
 #include "root_certs.h"
 #include "web_ui.h"
 
-static const char *FW_VERSION = "0.7.1";
+static const char *FW_VERSION = "0.8.0";
 static const char *HOSTNAME = "yicam-bridge";
 static const char *SETUP_AP_NAME = "YiCam-Setup";
 // The setup network's password is generated per device (see setupApPassword()).
@@ -528,8 +528,19 @@ String jsonStr(const String &j, const char *key) {
 // POSTs to the Apps Script web app and returns its JSON reply ("" on network
 // failure). Apps Script answers with a 302 to script.googleusercontent.com,
 // where the result is read with a GET.
+SemaphoreHandle_t scriptMutex;  // one Apps Script call at a time (two TLS handshakes each)
+
+String scriptCallLocked(const String &action, const String &extraQuery, const String &body, bool quiet);
+
 String scriptCall(const String &action, const String &extraQuery, const String &body,
                   bool quiet = false) {
+  xSemaphoreTake(scriptMutex, portMAX_DELAY);
+  String r = scriptCallLocked(action, extraQuery, body, quiet);
+  xSemaphoreGive(scriptMutex);
+  return r;
+}
+
+String scriptCallLocked(const String &action, const String &extraQuery, const String &body, bool quiet) {
   String host, basePath;
   if (!splitHttpsUrl(cfg.scriptUrl, host, basePath)) {
     if (!quiet) setError("upload: the Apps Script URL is missing or not https://");
@@ -540,7 +551,12 @@ String scriptCall(const String &action, const String &extraQuery, const String &
   WiFiClientSecure tls;
   tls.setCACert(GOOGLE_ROOT_CAS);
   tls.setTimeout(30);  // seconds
+  uint32_t s0 = millis();
   if (!tls.connect(host.c_str(), 443)) {
+    char why[80] = {0};
+    tls.lastError(why, sizeof(why));
+    Serial.printf("[script] %s: can't connect to %s (%s), free heap %u\n", action.c_str(), host.c_str(), why,
+                  ESP.getFreeHeap());
     if (!quiet) setError("upload: can't reach " + host);
     return "";
   }
@@ -548,22 +564,30 @@ String scriptCall(const String &action, const String &extraQuery, const String &
             String(FW_VERSION) + "\r\nContent-Type: application/json\r\nContent-Length: " +
             String(body.length()) + "\r\nConnection: close\r\n\r\n");
   if (body.length()) tls.print(body);
+  uint32_t sConn = millis();
   String location;
   int code = readResponseHead(tls, location);
+  uint32_t sHead = millis();
   String reply;
   if (code == 200) reply = tls.readString();
   tls.stop();
+  uint32_t s2 = millis(), s2conn = 0;
   if (code == 302 && location.startsWith("https://")) {
     WiFiClientSecure tls2;
     tls2.setCACert(GOOGLE_ROOT_CAS);
     HTTPClient http;
     http.setTimeout(20000);
     if (http.begin(tls2, location)) {
-      if (http.GET() == HTTP_CODE_OK) reply = http.getString();
+      int c2 = http.GET();
+      s2conn = millis();
+      if (c2 == HTTP_CODE_OK) reply = http.getString();
       http.end();
     }
   }
-  if (reply.isEmpty() && !quiet) setError("upload: no answer from the Apps Script (HTTP " + String(code) + ")");
+  if (reply.isEmpty()) {
+    Serial.printf("[script] %s: no reply (HTTP %d), free heap %u\n", action.c_str(), code, ESP.getFreeHeap());
+    if (!quiet) setError("upload: no answer from the Apps Script (HTTP " + String(code) + ")");
+  }
   return reply;
 }
 
@@ -690,39 +714,141 @@ long openCameraFile(HTTPClient &http, WiFiClient &client, const String &path, si
   return http.getSize();
 }
 
-// One-request upload (photos): metadata + bytes, streamed. Returns the file id.
+// --- Keep-alive connection to the Drive API (worker task only) ---------------
+// A TLS handshake costs the ESP32 ~3 s, so photo uploads reuse one connection.
+// Replies are read by Content-Length (or chunked), never by waiting for a timeout.
+WiFiClientSecure driveKA;
+bool driveKAused = false;  // the open connection has carried a request already
+
+void driveKAclose() {
+  driveKA.stop();
+  driveKAused = false;
+}
+
+bool driveKAopen() {
+  if (driveKA.connected()) return true;
+  driveKA.stop();
+  driveKAused = false;
+  driveKA.setCACert(GOOGLE_ROOT_CAS);
+  driveKA.setTimeout(30);
+  if (driveKA.connect(DRIVE_HOST, 443)) return true;
+  setError("upload: can't reach " + String(DRIVE_HOST));
+  return false;
+}
+
+struct HttpReply {
+  int code = 0;
+  bool keepAlive = true;
+  String body;
+};
+
+void readBodyBytes(WiFiClientSecure &c, String &out, long n) {
+  char buf[257];
+  uint32_t deadline = millis() + 20000;
+  while (n > 0 && millis() < deadline) {
+    int a = c.available();
+    if (a <= 0) {
+      if (!c.connected()) break;
+      delay(2);
+      continue;
+    }
+    int k = c.read((uint8_t *)buf, n < 256 ? n : 256);
+    if (k <= 0) continue;
+    n -= k;
+    if (out.length() < 4096) {  // replies we care about are small JSON
+      buf[k] = 0;
+      out += buf;
+    }
+  }
+}
+
+// Status line, headers and body. Returns false if the connection died first.
+bool readReply(WiFiClientSecure &c, HttpReply &r) {
+  uint32_t deadline = millis() + 30000;
+  while (!c.available() && c.connected() && millis() < deadline) delay(5);
+  if (!c.available()) return false;
+  String status = c.readStringUntil('\n');
+  int sp = status.indexOf(' ');
+  if (sp < 0) return false;
+  r.code = status.substring(sp + 1, sp + 4).toInt();
+  long len = -1;
+  bool chunked = false;
+  for (;;) {
+    String line = c.readStringUntil('\n');
+    line.trim();
+    if (line.isEmpty()) break;
+    int colon = line.indexOf(':');
+    if (colon < 0) continue;
+    String k = line.substring(0, colon);
+    String v = line.substring(colon + 1);
+    k.toLowerCase();
+    v.trim();
+    if (k == "content-length") len = v.toInt();
+    else if (k == "transfer-encoding" && v.equalsIgnoreCase("chunked")) chunked = true;
+    else if (k == "connection" && v.equalsIgnoreCase("close")) r.keepAlive = false;
+  }
+  if (chunked) {
+    for (;;) {
+      String size = c.readStringUntil('\n');
+      size.trim();
+      long n = strtol(size.c_str(), nullptr, 16);
+      if (n <= 0) {
+        c.readStringUntil('\n');
+        break;
+      }
+      readBodyBytes(c, r.body, n);
+      c.readStringUntil('\n');
+    }
+  } else if (len >= 0) {
+    readBodyBytes(c, r.body, len);
+  } else {
+    r.body = c.readString();  // no length: read to close
+    r.keepAlive = false;
+  }
+  return true;
+}
+
+// One-request upload (photos): metadata + bytes, streamed over the kept-alive
+// connection. Returns the file id; *retry is set when a reused connection
+// turned out to be closed by Drive before answering (worth one fresh attempt).
 String driveUploadSmall(const String &name, const String &folder, const char *mime, WiFiClient &src,
-                        size_t len) {
-  WiFiClientSecure tls;
-  if (!driveConnect(tls)) return "";
+                        size_t len, bool *retry) {
+  *retry = false;
+  if (!driveKAopen()) return "";
+  bool reused = driveKAused;
+  driveKAused = true;
   const char *B = "yicam-bridge-boundary";
   String meta = "{\"name\":\"" + jsonEscape(name) + "\",\"parents\":[\"" + folder + "\"]}";
   String head = String("--") + B + "\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n" + meta +
                 "\r\n--" + B + "\r\nContent-Type: " + mime + "\r\n\r\n";
   String tail = String("\r\n--") + B + "--\r\n";
-  tls.print(String("POST /upload/drive/v3/files?uploadType=multipart&fields=id HTTP/1.1\r\nHost: ") +
-            DRIVE_HOST + "\r\nAuthorization: Bearer " + accessToken +
-            "\r\nContent-Type: multipart/related; boundary=" + B +
-            "\r\nContent-Length: " + String(head.length() + len + tail.length()) +
-            "\r\nConnection: close\r\n\r\n");
-  tls.print(head);
+  driveKA.print(String("POST /upload/drive/v3/files?uploadType=multipart&fields=id HTTP/1.1\r\nHost: ") +
+                DRIVE_HOST + "\r\nAuthorization: Bearer " + accessToken +
+                "\r\nContent-Type: multipart/related; boundary=" + B +
+                "\r\nContent-Length: " + String(head.length() + len + tail.length()) +
+                "\r\nConnection: keep-alive\r\n\r\n" + head);
   size_t copied;
-  PumpResult pr = pump(src, tls, len, false, &copied);
+  PumpResult pr = pump(src, driveKA, len, false, &copied);
   if (pr != PUMP_OK) {
-    tls.stop();
-    setError(pr == PUMP_SRC_FAIL ? "upload: the camera stopped sending the photo"
-                                 : "upload: the connection to Drive dropped");
+    driveKAclose();
+    if (pr == PUMP_DST_FAIL && reused) *retry = true;
+    else setError(pr == PUMP_SRC_FAIL ? "upload: the camera stopped sending the photo"
+                                      : "upload: the connection to Drive dropped");
     return "";
   }
-  tls.print(tail);
-  String loc;
-  int code = readResponseHead(tls, loc);
-  String body = tls.readString();
-  tls.stop();
-  String id = jsonStr(body, "id");
-  if (code == 401) accessToken = "";  // expired early: get a new one next time
-  if (code != 200 || id.isEmpty()) setError("upload: Drive answered HTTP " + String(code) + " " + body.substring(0, 120));
-  return code == 200 ? id : "";
+  driveKA.print(tail);
+  HttpReply r;
+  if (!readReply(driveKA, r)) {
+    driveKAclose();
+    if (reused) *retry = true;
+    else setError("upload: no answer from Drive");
+    return "";
+  }
+  if (!r.keepAlive) driveKAclose();
+  String id = jsonStr(r.body, "id");
+  if (r.code == 401) accessToken = "";  // expired early: get a new one next time
+  if (r.code != 200 || id.isEmpty()) setError("upload: Drive answered HTTP " + String(r.code) + " " + r.body.substring(0, 120));
+  return r.code == 200 ? id : "";
 }
 
 void localNames(time_t t, String &day, String &stamp) {
@@ -737,7 +863,9 @@ void localNames(time_t t, String &day, String &stamp) {
 
 bool uploadSlot(int i) {
   Slot &sl = slotStore.s[i];
+  uint32_t t0 = millis();
   if (!ensureToken()) return false;
+  uint32_t tTok = millis();
   time_t t = sl.t ? (time_t)sl.t : time(nullptr);
   String day, stamp;
   localNames(t, day, stamp);
@@ -747,11 +875,13 @@ bool uploadSlot(int i) {
                 ((sl.flags & SLOT_LIVE) ? "-l" : (sl.flags & SLOT_REMOTE) ? "-r" : "") + ".jpg";
   String folder = dayFolder(day);
   if (folder.isEmpty()) return false;
+  uint32_t tFolder = millis();
 
   WiFiClient client;
   HTTPClient http;
   int code = 0;
   long len = openCameraFile(http, client, "/record/" + slotFile(i), 0, &code);
+  uint32_t tCam = millis();
   if (len <= 2048) {
     http.end();
     if (code == 404) {  // gone from the camera (card swapped?): nothing to upload
@@ -761,8 +891,17 @@ bool uploadSlot(int i) {
     setError("upload: can't read " + slotFile(i) + " from the camera (HTTP " + String(code) + ")");
     return false;
   }
-  String id = driveUploadSmall(name, folder, "image/jpeg", *http.getStreamPtr(), (size_t)len);
+  bool retry;
+  String id = driveUploadSmall(name, folder, "image/jpeg", *http.getStreamPtr(), (size_t)len, &retry);
   http.end();
+  if (id.isEmpty() && retry) {  // Drive had closed the idle connection: once more, fresh
+    WiFiClient client2;
+    HTTPClient http2;
+    len = openCameraFile(http2, client2, "/record/" + slotFile(i), 0, &code);
+    if (len > 2048) id = driveUploadSmall(name, folder, "image/jpeg", *http2.getStreamPtr(), (size_t)len, &retry);
+    http2.end();
+    if (id.isEmpty() && retry) setError("upload: the connection to Drive dropped");
+  }
   if (id.isEmpty()) return false;
   sl.state = 0;
   saveSlots();
@@ -770,7 +909,9 @@ bool uploadSlot(int i) {
   // the page asks, which saves the bridge two connections per frame.
   if (!(sl.flags & SLOT_LIVE)) reportSaved(id, name, folder, "photo");
   setText(lastUploaded, name);
-  Serial.printf("[upload] %s -> Drive (%ld bytes)\n", name.c_str(), len);
+  Serial.printf("[upload] %s -> Drive (%ld bytes) in %lu ms: token %lu, folder %lu, camera %lu, drive %lu\n",
+                name.c_str(), len, (unsigned long)(millis() - t0), (unsigned long)(tTok - t0),
+                (unsigned long)(tFolder - tTok), (unsigned long)(tCam - tFolder), (unsigned long)(millis() - tCam));
   return true;
 }
 
@@ -1089,8 +1230,24 @@ long jsonNum(const String &j, const char *key) {
   return i < 0 ? 0 : j.substring(i + k.length()).toInt();
 }
 
+void pollRemote();
+
+// Check-ins run in their own task, so their ~9 s (two TLS handshakes plus the
+// script) never hold up photo uploads.
+void pollTask(void *) {
+  for (;;) {
+    if (cfg.remoteOn && cfg.scriptUrl.length() && WiFi.isConnected() &&
+        (int32_t)(millis() - nextPollMs) >= 0)
+      pollRemote();
+    vTaskDelay(pdMS_TO_TICKS(250));
+  }
+}
+
 void pollRemote() {
+  uint32_t t0 = millis();
   String r = scriptCall("poll", "", pollBody(), true);
+  Serial.printf("[poll] %lu ms, free heap %u (lowest %u)\n", (unsigned long)(millis() - t0),
+                ESP.getFreeHeap(), ESP.getMinFreeHeap());
   if (r.indexOf("\"ok\":true") < 0) {
     // Network trouble: back off 1, 2, 4… up to 10 min. A script without the
     // poll request (older Code.gs) answers with an error: check rarely.
@@ -1143,9 +1300,34 @@ void pollRemote() {
     }
   }
   // Acknowledge new requests quickly so the page can show "picked up".
-  // While the live view runs, check in every 10 s so frequency changes and
+  // Live view = presence: the reply says whether the control page is open and
+  // how often it wants a frame. Follow that state (lease renewed each check-in).
+  int lv = r.indexOf("\"live\":{");
+  if (lv >= 0) {
+    String obj = r.substring(lv + 7, r.indexOf('}', lv) + 1);
+    long every = jsonNum(obj, "every"), secs = jsonNum(obj, "secs");
+    if (every < 3) every = 3;
+    if (every > 60) every = 60;
+    if (secs < 15) secs = 15;
+    if (secs > 120) secs = 120;
+    bool wasLive = remoteActive && remoteLive;
+    remoteEveryMs = (uint32_t)every * 1000UL;
+    remoteUntilMs = millis() + (uint32_t)secs * 1000UL;
+    remoteLive = true;
+    remoteActive = true;
+    if (!wasLive) {
+      manualShot = true;  // first frame right away
+      remoteShotFlags = SLOT_LIVE;
+      Serial.printf("[remote] live view: a frame every %ld s\n", every);
+    }
+  } else if (r.indexOf("\"live\":null") >= 0 && remoteActive && remoteLive) {
+    remoteActive = false;
+    remoteLive = false;
+    Serial.println("[remote] live view: nobody watching, stopped");
+  }
+  // While the live view runs, check in every 15 s so frequency changes and
   // Pause take effect quickly.
-  uint32_t interval = (remoteActive && remoteLive && cfg.pollSec > 10) ? 10 : cfg.pollSec;
+  uint32_t interval = (remoteActive && remoteLive && cfg.pollSec > 15) ? 15 : cfg.pollSec;
   nextPollMs = millis() + (got ? 2000UL : interval * 1000UL);
 }
 
@@ -1206,14 +1388,16 @@ void workerTask(void *) {
     statPending = pendingSlots();
 
     // Don't start an upload right before the next shot is due.
-    bool capturing = (motionActive && shotsThisEvent < cfg.maxShots) || remoteActive;
+    // A live frame that's blocked by the previous one still uploading isn't
+    // "due": otherwise uploads and check-ins would wait for a shot that can't
+    // happen until that upload is done (a deadlock until the live request expired).
+    bool remoteCanShoot = remoteActive && !(remoteLive && liveFramePending());
+    bool capturing = (motionActive && shotsThisEvent < cfg.maxShots) || remoteCanShoot;
     uint32_t nextInterval = (motionActive && shotsThisEvent < cfg.maxShots) ? cfg.intervalSec * 1000UL : remoteInterval;
     bool captureSoon = capturing && millis() - lastShotMs + 1500 >= nextInterval;
     if (!captureSoon && WiFi.isConnected()) {
       int slot = nextSlotToUpload();
-      if (cfg.remoteOn && cfg.scriptUrl.length() && (int32_t)(millis() - nextPollMs) >= 0) {
-        pollRemote();  // short; uploads continue on the next pass
-      } else if (slot >= 0 && (int32_t)(millis() - nextUploadMs) >= 0) {
+      if (slot >= 0 && (int32_t)(millis() - nextUploadMs) >= 0) {
         digitalWrite(LED_PIN, HIGH);
         if (uploadSlot(slot)) {
           statUploaded++;
@@ -1234,6 +1418,7 @@ void workerTask(void *) {
         flushSaved(!motionActive);  // report uploads before a long video starts
       } else if (slot < 0 && !motionActive && !remoteActive && videoStore.count &&
                  (int32_t)(millis() - nextVideoMs) >= 0) {
+        driveKAclose();  // clips use their own connections; keep memory free
         char clip[32];
         xSemaphoreTake(videoMutex, portMAX_DELAY);
         memcpy(clip, videoStore.q[0].path, sizeof(clip));
@@ -1931,6 +2116,7 @@ void setup() {
   pinMode(BOOT_BUTTON_PIN, INPUT_PULLUP);
   textMutex = xSemaphoreCreateMutex();
   videoMutex = xSemaphoreCreateMutex();
+  scriptMutex = xSemaphoreCreateMutex();
 
   loadConfig();
   loadSlots();
@@ -1978,6 +2164,8 @@ void setup() {
   setupWeb();
 
   xTaskCreatePinnedToCore(workerTask, "worker", 16384, nullptr, 1, nullptr, 1);
+  // 20 KB: an Apps Script call keeps two TLS clients (several KB each) on the stack.
+  xTaskCreatePinnedToCore(pollTask, "poll", 20480, nullptr, 1, nullptr, 0);
   Serial.println("[boot] ready");
 }
 

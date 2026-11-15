@@ -152,7 +152,7 @@ function handleSaved_(body) {
  * Opened by you (deployment "Only myself", signed in): the control page.
  * Anyone else, e.g. the bridge's own deployment opened anonymously: a health check.
  */
-const CODE_VERSION = '0.7.2';
+const CODE_VERSION = '0.8.0';
 
 function doGet(e) {
   // ?diag=1: why the control page does or doesn't open. Only yes/no answers,
@@ -219,7 +219,8 @@ function handlePoll_(body) {
     if (changed || cmds.length !== n) props.setProperty('COMMANDS', JSON.stringify(cmds));
     return {
       ok: true,
-      commands: cmds.filter(c => c.state === 'queued').map(c => ({ id: c.id, type: c.type, secs: c.secs || 0, every: c.every || 0 })),
+      commands: cmds.filter(c => c.state === 'queued').map(c => ({ id: c.id, type: c.type, secs: c.secs || 0 })),
+      live: currentLive_(),
     };
   });
 }
@@ -256,8 +257,9 @@ function requireOwner_() {
   if (!isOwner_()) throw new Error('Not allowed. Open this page signed in as the script owner.');
 }
 
-function ui_state() {
+function ui_state(liveEvery) {
   requireOwner_();
+  if (Number(liveEvery) > 0) setLivePresence_(liveEvery);  // the open page is the heartbeat
   const bridge = JSON.parse(CacheService.getScriptCache().get('BRIDGE') || 'null');
   const cmds = JSON.parse(PropertiesService.getScriptProperties().getProperty('COMMANDS') || '[]');
   const shown = cmds.filter(c => c.type !== 'live' && c.type !== 'stop');
@@ -373,24 +375,29 @@ function ui_timeline(dayId) {
 }
 
 /**
- * Live view from the control page: the bridge takes a frame every `every`
- * seconds for the next 2 minutes; the open page renews it every minute and
- * stops it when paused or hidden. Only one live request waits at a time.
+ * Live view = presence. While the control page is open and in the foreground,
+ * every status request it makes says "watching, a frame every N s"; that's
+ * kept for 30 s. Each bridge check-in reads the current state: live with its
+ * interval, or nobody watching. No commands to acknowledge, lose or repeat.
  */
+const LIVE_PRESENCE_MS = 30 * 1000;
+const LIVE_LEASE_S = 40;  // the bridge keeps going this long after a check-in that says "live"
+
+function setLivePresence_(every) {
+  every = Math.max(3, Math.min(60, Number(every) || 5));
+  CacheService.getScriptCache().put('LIVE', JSON.stringify({ every: every, at: Date.now() }), 120);
+}
+
+function currentLive_() {
+  const p = JSON.parse(CacheService.getScriptCache().get('LIVE') || 'null');
+  return p && Date.now() - p.at < LIVE_PRESENCE_MS ? { every: p.every, secs: LIVE_LEASE_S } : null;
+}
+
+/** Start/stop now (Pause, frequency change), without waiting for the next status request. */
 function ui_live(action, every) {
   requireOwner_();
-  every = Math.max(3, Math.min(60, Number(every) || 5));
-  withLock_(() => {
-    const props = PropertiesService.getScriptProperties();
-    const now = Date.now();
-    let cmds = JSON.parse(props.getProperty('COMMANDS') || '[]')
-      .filter(c => now - c.created < CMD_KEEP_MS)
-      .filter(c => !(c.state === 'queued' && (c.type === 'live' || c.type === 'stop')));  // superseded
-    const id = now.toString(36) + Math.floor(Math.random() * 1e6).toString(36);
-    if (action === 'start') cmds.push({ id: id, type: 'live', secs: 120, every: every, created: now, state: 'queued' });
-    else cmds.push({ id: id, type: 'stop', secs: 0, created: now, state: 'queued' });
-    props.setProperty('COMMANDS', JSON.stringify(cmds.slice(-20)));
-  });
+  if (action === 'start') setLivePresence_(every);
+  else CacheService.getScriptCache().remove('LIVE');
   return ui_state();
 }
 

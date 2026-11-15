@@ -202,7 +202,7 @@ function schedulePoll() {
   pollTimer = setTimeout(poll, LV.on ? Math.min(5, LV.every) * 1000 : 5000);
 }
 async function poll() {
-  try { renderState(await run('ui_state')); }
+  try { renderState(await run('ui_state', LV.on && !document.hidden ? LV.every : 0)); }
   catch (e) { err(String(e.message || e)); }
   schedulePoll();
 }
@@ -305,18 +305,17 @@ function renderLiveCtl() {
   const box = $('every'); box.textContent = '';
   for (const v of EVERY) {
     const b = document.createElement('button'); b.textContent = v + ' s'; b.className = v === LV.every ? 'sel' : '';
-    b.onclick = () => { LV.every = v; saveLV(); renderLiveCtl(); if (LV.on && !document.hidden) liveStart(true); schedulePoll(); };
+    b.onclick = () => { LV.every = v; saveLV(); renderLiveCtl(); if (LV.on && !document.hidden) liveStart(true); };
     box.appendChild(b);
   }
 }
+// The page's own status requests are the live view's heartbeat (see poll()).
 async function liveStart(keepFirst) {
   if (!keepFirst) { LV.startedAt = Date.now(); LV.first = false; setLoading(true, 'Starting live view…'); updateStale(); }
   try { renderState(await run('ui_live', 'start', LV.every)); } catch (e) { err(String(e.message || e)); }
-  clearInterval(LV.renew);
-  LV.renew = setInterval(() => { if (LV.on && !document.hidden) run('ui_live', 'start', LV.every).catch(() => {}); }, 60000);
+  schedulePoll();
 }
 async function liveStop() {
-  clearInterval(LV.renew); LV.renew = null;
   setLoading(false); TM.end = 0; updateStale();
   $('latestStat').textContent = 'paused';
   try { await run('ui_live', 'stop'); } catch (e) {}

@@ -81,7 +81,8 @@ To test it, run `testNotification` in the editor. You should get a "[Test] YiCam
 
 A second deployment of the same script gives you a page, signed in with your Google account, with:
 - **Live view:** while the page is open and in the foreground, the bridge takes a frame every 3, 5, 10 or 30 s (your choice, remembered on each device), and the panel shows the newest one. **Pause** stops it.
-  - It also stops when you switch apps or lock the phone, and by itself within 2 minutes if the page is closed.
+  - How it works: the page's regular status requests tell the script "watching, a frame every N s". Each bridge check-in (every 15 s while live) reads that state: live, or nobody watching.
+  - It also stops when you switch apps or lock the phone, and by itself about a minute after the page is closed.
   - A spinner only shows when there's no image at all yet. The first frame arrives within one check-in.
   - Frames are named `…-l.jpg` and kept out of emails and the timeline, and frames older than 15 minutes are deleted.
   - Live frames are low resolution (~30–50 KB), so at 5 s it's roughly 30 MB of mobile data per hour of watching. Motion and requested photos keep your full resolution.
